@@ -23,6 +23,8 @@ class Manager:
         self.views = {}
         self.workers = {}
         self.threaded = False
+        self.live = set()
+        self.follow_selection = True
         self.selected = ''
         self.game = None
         self.error = ''
@@ -134,7 +136,9 @@ class Manager:
                     offline = [r for k, r in self.records.items() if k not in live
                                and r.get('sandbox', '') == target['sandbox']
                                and not any(t['pid'] == r.get('pid') and t['created'] == r.get('created') for t in targets)]
-                    record = dict(offline[0]) if len(offline) == 1 and sum(t['sandbox'] == target['sandbox'] for t in targets) == 1 else {'id': uuid.uuid4().hex}
+                    previous = next((r for r in offline if r['id'] == self.selected and self.follow_selection), None)
+                    reusable = offline[0] if len(offline) == 1 else previous
+                    record = dict(reusable) if reusable is not None and sum(t['sandbox'] == target['sandbox'] for t in targets) == 1 else {'id': uuid.uuid4().hex}
                 record.update(pid=target['pid'], created=target['created'], sandbox=target['sandbox'])
                 ident = record['id']
                 if ident not in self.engines:
@@ -152,8 +156,21 @@ class Manager:
             if ident not in live:
                 with engine.lock:
                     engine.fixed_target = {**engine.fixed_target, 'pid': None, 'created': None}
+        self.live = live
         self.error = '' if len(live) == len(targets) else self.error
         if self.selected not in self.engines and self.engines: self.selected = next(iter(self.engines))
+        if self.selected in live:
+            self.follow_selection = True
+        # A restarted game may have a new slot when several historical records
+        # exist. Follow only the sole live process in the selected environment;
+        # keep that slot's configuration and never guess between concurrent PIDs.
+        if self.follow_selection and self.selected not in live:
+            selected_record = self.records.get(self.selected, {})
+            environment = selected_record.get('sandbox', '')
+            replacements = [ident for ident in live if self.records[ident].get('sandbox', '') == environment
+                            or selected_record.get('pid') is None]
+            if len(replacements) == 1:
+                self.selected = replacements[0]
         runtime.atomic_json(runtime.DATA/'instances.json', {
             'version': 1, 'selected': self.selected, 'instances': list(self.records.values())})
 
@@ -165,7 +182,11 @@ class Manager:
 
     def select(self, ident):
         engine = self.target_engine(ident)
-        with self.lock: self.selected = ident
+        with self.lock:
+            self.selected = ident
+            # Explicitly viewing an offline slot must remain possible, e.g. to
+            # inspect its configuration or launch its environment manually.
+            self.follow_selection = ident in self.live
         return engine
 
     def refresh(self):
@@ -211,6 +232,13 @@ class Manager:
 
     def public_state(self):
         with self.lock:
+            def connected(ident, state):
+                record = self.records.get(ident, {})
+                stamp = state.get('snapshot_time', 0)
+                return (ident in self.live and state.get('connected', False)
+                        and state.get('connection', {}).get('pid') == record.get('pid')
+                        and stamp >= (record.get('created') or 0) and 0 <= time.time()-stamp <= 8)
+
             view = dict(self.views.get(self.selected, self.empty_view))
             if self.selected in self.engines:
                 engine = self.engines[self.selected]
@@ -218,14 +246,15 @@ class Manager:
                 # behind a scheduler doing file I/O or native reconciliation.
                 view['config'] = engine.config
                 view['running'] = engine.running
-            if time.time()-view.get('snapshot_time', 0) > 8:
-                view['connected'] = False
+            view['connected'] = connected(self.selected, view)
             rows = []
             for ident, record in self.records.items():
                 state = self.views.get(ident, {})
+                present = ident in self.live
                 rows.append({'id': ident, 'sandbox': record.get('sandbox', ''),
-                    'pid': record.get('pid'), 'connected': state.get('connected', False) and time.time()-state.get('snapshot_time',0) <= 8,
-                    'running': state.get('running', False), 'status': state.get('status', '正在读取'),
+                    'pid': record.get('pid') if present else None, 'last_pid': record.get('pid'),
+                    'connected': connected(ident, state),
+                    'running': self.engines[ident].running, 'status': state.get('status', '正在读取') if present else '游戏未运行',
                     'auto_relaunch': state.get('config', {}).get('auto_relaunch', False)})
             view['instances'] = rows
             view['instance_id'] = self.selected

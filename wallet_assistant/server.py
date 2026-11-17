@@ -8,6 +8,7 @@ import urllib.parse
 import threading
 import traceback
 from .runtime import SOURCE
+from . import VERSION
 
 class Server(ThreadingHTTPServer):
     daemon_threads=True
@@ -49,7 +50,7 @@ class Handler(BaseHTTPRequestHandler):
         if path=='/api/state':
             state=self.server.engine.public_state();state['csrf']=self.server.csrf
             return self.reply(200,state)
-        if path=='/api/health': return self.reply(200,{'app':'wallet-heroes-assistant','version':'0.4.0'})
+        if path=='/api/health': return self.reply(200,{'app':'wallet-heroes-assistant','version':VERSION})
         if path=='/api/config/export': return self.reply(200,self.server.engine.public_state()['config'])
         root=(SOURCE/'web/dist').resolve()
         target=(root/urllib.parse.unquote(path).lstrip('/')).resolve()

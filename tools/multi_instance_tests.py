@@ -11,7 +11,7 @@ import urllib.error
 
 
 def run(check):
-    from wallet_assistant import runtime, sandbox
+    from wallet_assistant import runtime, sandbox, VERSION
     from wallet_assistant.manager import Manager
     from wallet_assistant.engine import Engine
     from wallet_assistant.policy import Action
@@ -78,7 +78,7 @@ def run(check):
                 check('缺少实例身份的写请求拒绝执行', post('/api/pause',{})==409 and engines[1].running)
                 check('伪造实例身份无法控制其他账号', post('/api/pause',{'_instance_id':'missing'})==409 and engines[1].running)
                 check('写请求按明确实例路由而非页面当前选择', post('/api/pause',{'_instance_id':list(manager.engines)[0]})==200 and engines[1].running)
-                check('网页服务健康检查在多实例下可用', json.load(urllib.request.urlopen(server.origin+'/api/health'))['version']=='0.4.0')
+                check('网页服务健康检查在多实例下可用', json.load(urllib.request.urlopen(server.origin+'/api/health'))['version']==VERSION)
             finally: server.shutdown(); server.server_close(); thread.join(3)
             with patch.object(runtime, 'DATA', Path(temporary)/'same-box-host'), \
                     patch.object(sandbox, 'connection', side_effect=lambda p,d,preferred='': {**connection(p,d,preferred), 'sandbox':'shared'}):
@@ -118,3 +118,99 @@ def run(check):
             manager.stop(); release.set()
             for worker in manager.workers.values(): worker.join(3)
             check('停止助手会关闭所有实例调度线程', all(not w.is_alive() for w in manager.workers.values()))
+    selection_checks(check)
+
+
+def selection_checks(check):
+    """Reproduce stale selected PIDs across restarts with conflicting preferences."""
+    from wallet_assistant import runtime, sandbox
+    from wallet_assistant.manager import Manager
+    from wallet_assistant.policy import normalize_config
+
+    with tempfile.TemporaryDirectory() as temporary, patch.object(runtime, 'DATA', Path(temporary)/'host'):
+        game = Path(temporary)/'game'
+        created = time.time()-60
+        p1 = SimpleNamespace(pid=201, create_time=lambda: created)
+        p2 = SimpleNamespace(pid=202, create_time=lambda: created+1)
+        records = [
+            {'id':'a'*32, 'sandbox':'box', 'pid':101, 'created':created-100},
+            {'id':'b'*32, 'sandbox':'', 'pid':102, 'created':created-90},
+            {'id':'c'*32, 'sandbox':'box', 'pid':103, 'created':created-80},
+            {'id':'d'*32, 'sandbox':'box', 'pid':201, 'created':created},
+        ]
+        for record in records:
+            runtime.atomic_json(runtime.DATA/'instances'/record['id']/'config.json', normalize_config({
+                'auto_start': record['id']=='a'*32, 'auto_relaunch':False,
+                'tick_seconds': 12 if record['id']=='d'*32 else 6}))
+        runtime.atomic_json(runtime.DATA/'instances.json', {'version':1, 'selected':'a'*32, 'instances':records})
+
+        def connection(process, data, preferred=''):
+            pid = process.pid if process else None
+            return {'sandbox':'box' if process else preferred, 'directory':data/'runtime'/'instances'/str(pid),
+                    'pid':pid, 'created':process.create_time() if process else None}
+
+        def export(process):
+            target=connection(process,runtime.DATA)
+            runtime.atomic_json(target['directory']/'snapshot.json', {'revision':18, 'pid':process.pid,
+                'time_unix':time.time(), 'connected':True, 'phase':'ready', 'account':{'player':{'id':1001}},
+                'pending_requests':{}, 'native_busy':{}, 'inventory':{}})
+
+        export(p1); export(p2)
+        with patch.object(runtime,'discover_game',return_value=game), patch.object(runtime,'install'), \
+                patch.object(runtime,'install_connection'), patch.object(runtime,'game_processes',return_value=[p1]) as processes, \
+                patch.object(sandbox,'connection',side_effect=connection), patch.object(runtime,'launch') as launch:
+            manager=Manager(); manager.run_once()
+            state=manager.public_state()
+            check('多个旧PID残留时页面自动跟随同沙盒唯一在运行实例', manager.selected=='d'*32 and state['connected'])
+            check('自动选择保留真实实例暂停与参数且不复制旧实例开关', not state['running']
+                  and state['config']['tick_seconds']==12 and manager.engines['a'*32].running)
+            check('旧PID卡片明确退出且不能借用在线快照', all(row['pid'] is None and not row['connected']
+                  and row['status']=='游戏未运行' and row['last_pid'] in (101,102,103)
+                  for row in state['instances'] if row['id']!='d'*32))
+            manager.persist(); restarted=Manager(); restarted.run_once()
+            check('重启助手后保留在线选择且不新增重复实例', restarted.selected=='d'*32
+                  and len(restarted.engines)==4 and restarted.public_state()['connected'])
+            manager.select('a'*32); manager.scan(force=True)
+            check('手动查看离线实例不会被下一次进程检测抢走', manager.selected=='a'*32)
+            manager.select('d'*32); processes.return_value=[p2]
+            manager.scan(force=True)
+            check('在线实例退出并换PID后选择跟随同环境新实例', manager.selected in manager.live
+                  and manager.records[manager.selected]['pid']==202)
+            check('刚退出的选中实例跨PID复用原配置目录与暂停偏好', manager.selected=='d'*32
+                  and len(manager.engines)==4 and not manager.target_engine().running
+                  and manager.target_engine().config['tick_seconds']==12)
+            check('PID切换尚未刷新时页面拒绝缓存中的旧进程连接', not manager.public_state()['connected'])
+            manager.run_once()
+            check('新进程只绑定自己的通信目录且旧请求不跨实例重放', manager.target_engine().connection['pid']==202
+                  and manager.target_engine().runtime_dir.name=='202' and not manager.target_engine().pending)
+            processes.return_value=[]; manager.scan(force=True)
+            p3=SimpleNamespace(pid=203,create_time=lambda:created+2)
+            export(p3); processes.return_value=[p3]
+            manager.scan(force=True); manager.run_once()
+            check('游戏退出一段时间后重开仍沿用选中实例暂停与参数', manager.selected=='d'*32
+                  and len(manager.engines)==4 and not manager.target_engine().running
+                  and manager.target_engine().config['tick_seconds']==12 and manager.public_state()['connected'])
+            manager.persist()
+            p4=SimpleNamespace(pid=204,create_time=lambda:created+3)
+            export(p4); processes.return_value=[p4]
+            rebooted=Manager(); rebooted.run_once()
+            check('助手和游戏同时重启换PID也保留原配置且不累积实例', rebooted.selected=='d'*32
+                  and len(rebooted.engines)==4 and not rebooted.target_engine().running
+                  and rebooted.target_engine().config['tick_seconds']==12 and rebooted.public_state()['connected'])
+            check('连接选择修复不启动或重启游戏', not launch.called)
+            # A stored local-game slot must not silently redirect controls to a sandbox.
+            runtime.atomic_json(runtime.DATA/'instances.json', {'version':1, 'selected':'b'*32, 'instances':records})
+            local=Manager(); local.run_once()
+            check('已选本机离线实例不会自动切换到其他沙盒', local.selected=='b'*32)
+            runtime.atomic_json(runtime.DATA/'instances.json', {'version':1, 'selected':'a'*32, 'instances':records})
+            processes.return_value=[p1,p2]
+            concurrent=Manager(); concurrent.run_once()
+            check('同沙盒两个实时PID时不猜测替代选中实例', concurrent.selected=='a'*32 and len(concurrent.live)==2)
+            # A console created before any game exists has no process identity to preserve.
+            with patch.object(runtime,'DATA',Path(temporary)/'first-launch'):
+                processes.return_value=[]
+                first=Manager(); first.run_once()
+                processes.return_value=[p1]
+                export(p1); first.scan(force=True); first.run_once()
+                check('先开助手后开沙盒游戏可自动选中首次在线实例', first.selected in first.live
+                      and first.public_state()['connected'])

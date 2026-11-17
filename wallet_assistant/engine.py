@@ -9,7 +9,7 @@ import os
 import threading
 import time
 import uuid
-from . import runtime
+from . import runtime, VERSION
 from .policy import Action, MODULES, normalize_config, plan, active_characters, equipped_ids, iid, power, reserve, capacity_goal, growth_budget, empty_socket_count
 
 def read_json(path, fallback=None):
@@ -900,7 +900,7 @@ class Engine:
             capacity = capacity_goal(s, self.opportunities, self.config)
             if capacity:
                 wait_reasons['runes'] = f"容量联动：为 {capacity['name']} 保留金币，等待资源到账"
-            return {'version':'0.4.0','status':self.status,'error':self.error,'running':self.running,
+            return {'version':VERSION,'status':self.status,'error':self.error,'running':self.running,
                 'connection': {'mode': 'sandbox' if self.connection.get('sandbox') else 'local',
                     'sandbox': self.connection.get('sandbox', ''), 'pid': self.connection.get('pid'),
                     'runtime_path': str(self.runtime_dir)},

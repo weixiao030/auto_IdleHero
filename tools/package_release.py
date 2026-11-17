@@ -12,6 +12,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from tools.build_release import verified_report
+from wallet_assistant import VERSION
 
 
 def sha256(path):
@@ -31,7 +32,7 @@ def json_bytes(value):
 def main():
     dist = ROOT / 'dist'
     stamp = datetime.now().strftime('%Y%m%d')
-    name = f'桌面勇者自动远征-多实例版-{stamp}'
+    name = f'桌面勇者自动远征-v{VERSION}-{stamp}'
     output = dist / f'{name}.zip'
     if output.exists():
         raise FileExistsError(f'保留已生成的分发包，不覆盖：{output}')
@@ -47,7 +48,7 @@ def main():
         if docx.testzip() is not None or 'word/document.xml' not in docx.namelist():
             raise ValueError('Word 教程结构损坏')
     release = {
-        'version': '0.4.0', 'worker_revision': 18,
+        'version': VERSION, 'worker_revision': 18,
         'file': executable_names[0], 'sha256': candidate['sha256'],
         'sandbox_file': executable_names[1], 'sandbox_sha256': candidate['sha256'],
         'source_tests': source['passed'], 'packaged_tests': packaged['passed'],
@@ -59,7 +60,7 @@ def main():
         folder = Path(staging)
         for filename in executable_names + [guide.name]:
             shutil.copy2(dist / filename, folder / filename)
-        (folder / '使用说明.txt').write_text('''桌面勇者自动远征 0.4.0 多实例版
+        (folder / '使用说明.txt').write_text(f'''桌面勇者自动远征 {VERSION} 多实例版
 
 1. 完整解压压缩包；先在本机或 Sandboxie 沙盒内启动 Steam 和游戏并完成登录。
 2. 在沙盒外双击“桌面勇者自动远征.exe”。“沙盒版.exe”功能相同，任选一个。
@@ -80,20 +81,25 @@ def main():
 根目录 config.json 是新实例模板，实例建立后独立保存。
 更新前暂停所有实例并等待待结算和维护任务结束；使用 --stop 后替换助手。
 不要覆盖旧配置、调度记录或账号存档。详细启动、更新和排错步骤见 Word 教程。
+Word 教程沿用 0.4.0，启动与日常操作同样适用于当前版本。
+游戏换 PID 后，助手跟随同一环境唯一的运行实例；手动选择离线实例后保持该选择。
+已退出的 PID 明确显示“已退出”，保留配置；多个游戏同时在线时不会擅自替换选中实例。
 
 游戏与 Steam 是否允许多个会话，取决于其自身限制。
 此包包含自有助手、文档和测试报告，不包含个人配置、账号日志、存档、游戏代码或游戏资源。
 ''', encoding='utf-8')
-        (folder / '验证说明.txt').write_text(f'''验证时间：2026-11-16
-版本：0.4.0，worker revision 18
+        (folder / '验证说明.txt').write_text(f'''发布复核时间：{datetime.now().strftime('%Y-%m-%d')}
+版本：{VERSION}，worker revision 18
 
 已通过：{source['passed']} 项源码回归、{packaged['passed']} 项 EXE 包内隔离自检、220 项 Godot 桥接边界检查，以及进程独立目录创建和快照写入检查。
 隔离回归覆盖本机与多个沙盒独立并行调度、同一沙盒不同 PID、命令和回执隔离、重启恢复，以及自动重连默认关闭。
 
-本轮实机覆盖：当前沙盒连接和状态刷新；一次只读邮件同步由原生成功回执核验；16 个网页模块逐一关闭和恢复开启，保存生效；重新检测、显示选项、桌面与 390px 窄屏布局通过，浏览器无错误或警告。保留原游戏会话和自动化暂停状态。
+本次连接修复实机覆盖：只重启助手，保留游戏 PID 与创建时间；各实例配置校验值不变，当前实例连接正常且保持原暂停状态。旧 PID 明确标记退出；游戏重启换 PID、助手重启、多实例歧义和手动选择由隔离回归覆盖。
+
+历史实机验收（2026-11-16，本次未重复执行）：当前沙盒连接和状态刷新；一次只读邮件同步由原生成功回执核验；16 个网页模块逐一关闭和恢复开启，保存生效；重新检测、显示选项、桌面与 390px 窄屏布局通过，浏览器无错误或警告。
 核验游戏 buildid 26636673，原生日志版本 v1.11.205。无需进一步逆向；如后续需要逆向，按约定使用 IDA。
 
-短时单实例、暂停自动化样本：助手 worker 单核 CPU 约 61.24% 降到 2.19%，RSS 约 187.4 MiB 降到 81.81 MiB；快照约 5.95 MB 缩减至 0.293 MB。8 次连续请求均连接正常，HTTP 响应约 4–14 ms。
+2026-11-16 短时单实例、暂停自动化样本：助手 worker 单核 CPU 约 61.24% 降到 2.19%，RSS 约 187.4 MiB 降到 81.81 MiB；快照约 5.95 MB 缩减至 0.293 MB。8 次连续请求均连接正常，HTTP 响应约 4–14 ms。
 这些样本不代表多实例或长期负载。
 
 实机边界：目前只有一个真实沙盒游戏会话；本机和多个沙盒账号同时运行由隔离回归覆盖，尚未完成多个真实 Steam 账号同时实机验收。未为测试而强制消费金币、强化装备或切换账号；未解锁和资源不足的消费功能仍需对应真实条件验收。
