@@ -1,0 +1,16 @@
+.private/
+runtime/
+__pycache__/
+*.pyc
+node_modules/
+web/dist/
+dist/
+build/
+*.spec
+backups/
+output/
+.playwright-cli/
+.playwright-mcp/
+.env
+.env.*
+!.env.example
