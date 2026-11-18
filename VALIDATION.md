@@ -16,7 +16,7 @@
 
 本轮证据在忽略目录 `.private/remaining-audit-20261118/`：`enhancement-before.json`／`enhancement-after.json`、`equipped-material-checks.json`、`current-protection-proof.json`、`deployed.json`、`enhancement-access-proof.json`、`receipts/`、`live-observation.jsonl` 与 `observation-proof.json`。修改前源码和 0.4.6 EXE 备份在 `original/`，部署时账号配置／调度备份在 `account-at-deploy/`。回滚时先关闭自动分解、暂停成长并等待结算／维护结束，以 `--stop` 正常退出助手，恢复 `original/dist/` EXE 与旧校验；源码可恢复 Git v0.4.6。保留当前账号配置和调度，不盲目覆盖账号备份。
 
-当前只有一个真实沙盒会话。强化需继续通关；多账号、新号至后期及长期运行仍未完整实机验收，原总目标保持 active。
+按用户最新要求，本轮以原生逻辑、运行中方法签名及已有回归完成验收，不再等待升级、资源或后期解锁。16 模块未发现新的调用不匹配，19 个运行中原生方法的参数个数全部匹配；技能自动生效和补给语义已核对。完整结论见 [v0.4.7 原生逻辑核对](releases/v0.4.7-audit.md)。未将多账号或未解锁的后期消费写成实机成功；下方旧版本的 active 状态保留为当时历史记录。
 
 ## 2026-11-18 v0.4.6 持续分解与成长共享调度
 
