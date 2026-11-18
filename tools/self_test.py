@@ -122,7 +122,7 @@ def run(output: Path):
         {'recipe_id':20,'category':'equipment','subtype':'Necklace','required_level':20,'executable':False,'target':{'popupArgs':{}},'plan':{'materials':[{'item_data_id':903,'required':1}]}},
         {'recipe_id':30,'category':'equipment','subtype':'Necklace','required_level':30,'executable':False,'target':{'popupArgs':{}},'plan':{'materials':[{'item_data_id':904,'required':1}]}},
     ]}
-    material_cfg=normalize_config({'modules':{'craft':False}})
+    material_cfg=normalize_config({'salvage_include_materials':True,'modules':{'craft':False}})
     material_actions=plan(material_bag,material_opportunities,{},material_cfg)
     material_quote=next(a for a in material_actions if a.kind=='salvage_quote')
     check('旧阶材料进入回收但保留当前阶段与下一阶段配方材料',material_quote.args==[101,104])
@@ -446,6 +446,8 @@ def run(output: Path):
     multi_instance_checks(check)
     from tools.growth_recovery_tests import run as growth_recovery_checks
     growth_recovery_checks(check)
+    from tools.salvage_control_tests import run as salvage_control_checks
+    salvage_control_checks(check)
     output.write_text(json.dumps({'passed':len(tests),'tests':tests},ensure_ascii=False,indent=2),encoding='utf8')
     print(f'{len(tests)} regression scenarios passed; {output}')
 

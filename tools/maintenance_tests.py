@@ -187,13 +187,34 @@ def run(check):
         engine=fresh();engine.maintenance_action();engine.maintenance['phase']='operate'
         check('其他入口已穿回后不反向卸装',engine.maintenance_action() is None and engine.maintenance['phase']=='restore')
         engine=fresh();engine.config['modules']['enhancement']=False
-        engine.opportunities.update(socket_ready=True,socket_gems=[{'id':501,'grade':1}])
+        engine.opportunities.update(socket_ready=True,socket_gems=[{'id':501,'grade':1,'count':1}],socket_gold_costs={'101':{'501':4000}})
         check('仅空槽且有材料才开始镶嵌维护',engine.maintenance_action().args==['hero',101,False]
               and engine.maintenance['module']=='socket')
         engine.snapshot['inventory']['equipped_equipment_ids_by_char']['hero']={}
         engine.maintenance['phase']='operate'
         engine.opportunities['socket_items']=[{'id':101,'empty_slots':[0]}]
-        check('镶嵌只使用原生确认的空槽',engine.maintenance_action().args==[101,0,501])
+        check('镶嵌只使用原生确认的空槽',engine.maintenance_action().args==[101,0,501,1200])
+        for cost in (None, True, '4000', -1, 1.5, float('nan')):
+            engine=fresh();engine.config['modules']['enhancement']=False
+            engine.opportunities.update(socket_ready=True,socket_gems=[{'id':501,'grade':1,'count':1}],socket_gold_costs={'101':{'501':cost}})
+            check('镶嵌成本未知或无效时不卸装：'+repr(cost),engine.maintenance_action() is None)
+        engine=fresh();engine.config['modules']['enhancement']=False
+        engine.opportunities.update(socket_ready=True,socket_gems=[{'id':501,'grade':1,'count':1}],socket_gold_costs={'101':{'501':9000}})
+        check('镶嵌保留共享金币预算且不先卸装',engine.maintenance_action() is None)
+        engine.opportunities['socket_gold_costs']['101']['501']=4000
+        engine.opportunities['time_unix']=990
+        check('镶嵌成本快照过期时不卸装',engine.maintenance_action() is None)
+        engine.opportunities['time_unix']=1000
+        engine.opportunities['runes']=[{'node_key':'bag','name':'bag','ok':True,'from_level':0,'max_level':5,'cost':[{'item_data_id':5,'count':8000}], 'node':{'effects':[{'type':'capacity','key':'equipment_inventory_slots','value':1}]}}]
+        engine.snapshot['inventory'].update(bag_occupied_slots=50,bag_unlocked_slots=50)
+        check('镶嵌不占用已可支付的扩容预算',engine.maintenance_action() is None)
+        engine.opportunities['runes']=[]
+        check('预算足够后正常开始镶嵌维护',engine.maintenance_action().args==['hero',101,False])
+        engine.snapshot['inventory']['equipped_equipment_ids_by_char']['hero']={}
+        engine.maintenance['phase']='operate'
+        engine.opportunities['socket_items']=[{'id':101,'empty_slots':[0]}]
+        engine.snapshot['inventory']['materials']['5']=3000
+        check('卸装后金币减少时先恢复装备而非提交镶嵌',engine.maintenance_action().args==['hero',101,True] and engine.maintenance['phase']=='restore')
         for state in [2,4,8,32,64]:
             engine=fresh();engine.snapshot['inventory']['items'][0]['state_flag']=state
             check('受保护装备不进入维护：'+str(state),engine.maintenance_action() is None)

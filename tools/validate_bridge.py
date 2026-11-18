@@ -88,6 +88,18 @@ class FakeGateway extends RefCounted:
     func snapshot():
         return account_data
 
+class FakeSocketRows extends RefCounted:
+    func rows(_snapshot, _store):
+        return {"10":{"id":10,"grade":3,"category_filter":"armor","definition":{}}}
+    func gems(_snapshot, _store):
+        return [{"id":20,"definition":{"fixture_cost":400}}]
+
+class FakeSocketClient extends RefCounted:
+    var calls: Array = []
+    func execute(id, plan):
+        calls.append([id,plan])
+        return true
+
 class FakeInventory extends RefCounted:
     var view = {"items":[],"server_inventory_mutation_safe":true}
     func _inventory_view_snapshot():
@@ -111,6 +123,7 @@ class FakeSkills extends RefCounted:
         return {"ok":true,"can_afford":true,"cost":[{"item_data_id":200501,"count":1}]}
 
 class FakeHost extends Node:
+    var store = RefCounted.new()
     var hero_progression_facade = FakeHeroes.new()
     var skill_runtime_facade = FakeSkills.new()
     var server_connection_ui_controller = FakeUI.new()
@@ -363,6 +376,12 @@ func _ready() -> void:
         worker.free()
         return
     checks += 1
+    if worker._consumable_instance(20, material_view, true):
+        push_error("Material salvage must default to disabled")
+        worker.free()
+        return
+    checks += 1
+    worker.control["salvage_include_materials"] = true
     if not worker._consumable_instance(20, material_view, true):
         push_error("Eligible material record was rejected for salvage")
         worker.free()
@@ -514,6 +533,60 @@ func _ready() -> void:
             worker.free()
             return
         checks += 1
+    worker.control = {"gold_reserve_min":200,"gold_reserve_ratio":0.12}
+    var worn_view = {"items":[{"instance_id":10,"grade":3,"level":1,"state_flag":0,"steam_trade_protected":true}],"steam_trade_ready":true,"equipped_equipment_ids_by_char":{"other":{"Head":10}}}
+    worker.control["salvage_allow_tradeable"] = true
+    for materials_enabled in [false,true]:
+        worker.control["salvage_include_materials"] = materials_enabled
+        if worker._consumable_instance(10,worn_view,true):
+            push_error("Other character's worn equipment entered salvage")
+            worker.free()
+            return
+        checks += 1
+    var wallet = {"materials":{"5":1000}}
+    for probe in [[800,200,true],[801,200,false],[0,1001,true],[-1,200,false],[true,200,false],[400,-1,false],[400,"200",false],[NAN,200,false],[400,INF,false],[400,600,true]]:
+        if worker._socket_budget_allows(probe[0],probe[1],wallet) != probe[2]:
+            push_error("Socket budget boundary failed: " + str(probe))
+            worker.free()
+            return
+        checks += 1
+    var socket_host = FakeHost.new()
+    socket_host.progression_selectors.view = {"items":[],"materials":{"5":1000},"server_inventory_mutation_safe":true}
+    worker.host = socket_host
+    worker.selectors = {"inventory":FakeSocketRows.new(),"socket":FakeSocketRows.new()}
+    var socket_client = FakeSocketClient.new()
+    worker.clients = {"socket":socket_client}
+    var socket_request = {"action":"socket","account_id":501,"args":[10,0,20,200]}
+    if worker._execute(socket_request) != true or socket_client.calls.size() != 1:
+        push_error("Affordable native socket execution was rejected")
+        socket_host.free()
+        worker.free()
+        return
+    checks += 1
+    socket_host.progression_selectors.view.materials["5"] = 500
+    if worker._execute(socket_request).get("error") != "socket_budget_changed" or socket_client.calls.size() != 1:
+        push_error("Socket execution ignored changed gold")
+        socket_host.free()
+        worker.free()
+        return
+    checks += 1
+    socket_request.args = [10,0,20]
+    if worker._execute(socket_request).get("error") != "invalid_arguments" or socket_client.calls.size() != 1:
+        push_error("Legacy socket command bypassed reserve")
+        socket_host.free()
+        worker.free()
+        return
+    checks += 1
+    socket_host.progression_selectors.view = worn_view.duplicate(true)
+    socket_host.progression_selectors.view["server_inventory_mutation_safe"] = true
+    if worker._execute({"action":"salvage_quote","account_id":501,"args":[10]}).get("error") != "protected_salvage_item":
+        push_error("Worn equipment reached native salvage quote")
+        socket_host.free()
+        worker.free()
+        return
+    checks += 1
+    worker.host = null
+    socket_host.free()
     var connection_checks = _connection_checks(worker)
     var fixture = load("res://loading_check.gd").new()
     var loading_checks = fixture.run(worker)
@@ -608,6 +681,7 @@ func _connection_checks(worker) -> int:
     fake.free()
     return checks
 ''',
+        'res://scripts/game/gem_socket_policy.gd':b'extends RefCounted\nstatic func apply_gold_cost(gem, _target):\n    return int(gem.get("fixture_cost", -1))\n',
         'res://loading_check.gd':(ROOT/'tools/fixtures/loading_check.gd').read_bytes(),
         'res://.godot/global_script_class_cache.cfg': b'list=[]\n',
     })
@@ -618,12 +692,12 @@ func _connection_checks(worker) -> int:
     if p.returncode or any(x in text for x in ['SCRIPT ERROR','Parse Error','Failed to load script']):
         raise SystemExit(1)
     if '[WalletHeroesAssistant] loader revision 2' not in text: raise SystemExit('Observer missing')
-    if 'const REVISION = 19' not in (ROOT/'bridge/worker.gd').read_text(encoding='utf8'): raise SystemExit('Multi-instance bridge revision missing')
-    if '[WalletHeroesAssistant] consumption checks passed: 74' not in text: raise SystemExit('Consumption boundary checks failed')
+    if 'const REVISION = 20' not in (ROOT/'bridge/worker.gd').read_text(encoding='utf8'): raise SystemExit('Multi-instance bridge revision missing')
+    if '[WalletHeroesAssistant] consumption checks passed: 91' not in text: raise SystemExit('Consumption boundary checks failed')
     if '[WalletHeroesAssistant] connection checks passed: 33' not in text: raise SystemExit('Connection boundary checks failed')
     if '[WalletHeroesAssistant] loading checks passed: 130' not in text: raise SystemExit('Loading boundary checks failed')
     report = {name:int(re.search(r'\[WalletHeroesAssistant\] '+name+r' checks passed: (\d+)', text).group(1)) for name in ('consumption','connection','loading')}
     report['total'] = sum(report.values())
-    report['worker_revision'] = 19
+    report['worker_revision'] = 20
     (ROOT/'runtime/bridge-validation.json').write_text(json.dumps(report,indent=2),encoding='utf8')
     print(f"Isolated observer syntax passed; {report['total']} boundary checks passed.")

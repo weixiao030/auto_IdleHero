@@ -1,6 +1,6 @@
 extends Node
 
-const REVISION = 19
+const REVISION = 20
 var data_dir: String
 var host: Node
 var gateway: Object
@@ -480,6 +480,15 @@ func _execute(request: Dictionary) -> Variant:
 				return {"ok": false, "error": "quote_target_changed"}
 			return clients.enhancement.call("execute")
 		"socket":
+			if args.size() != 4 or _positive_id(args[0]) <= 0 or _positive_id(args[2]) <= 0:
+				return {"ok": false, "error": "invalid_arguments"}
+			if typeof(args[1]) not in [TYPE_INT, TYPE_FLOAT] or not is_finite(args[1]) or args[1] < 0 or args[1] > 5 or floor(args[1]) != args[1]:
+				return {"ok": false, "error": "invalid_arguments"}
+			var socket_raw: Dictionary = gateway.call("snapshot")
+			var costs: Dictionary = _socket_gold_costs(selectors.inventory.call("rows", socket_raw, host.get("store")), selectors.socket.call("gems", socket_raw, host.get("store")))
+			var cost: Variant = costs.get(str(int(args[0])), {}).get(str(int(args[2])), -1)
+			if not _socket_budget_allows(cost, args[3], view):
+				return {"ok": false, "error": "socket_budget_changed"}
 			var plan: Dictionary = {int(args[1]): int(args[2])}
 			return clients.socket.call("execute", int(args[0]), plan)
 		"salvage_quote":
@@ -511,6 +520,40 @@ func _execute(request: Dictionary) -> Variant:
 			return {"ok": true, "entered_map_id": int(host.get("sim").get("map_id")), "in_dungeon": host.call("_is_dungeon_map", int(host.get("sim").get("map_id")))}
 
 	return {"ok": false, "error": "unsupported_action"}
+
+func _socket_gold_costs(rows: Dictionary, gems: Array) -> Dictionary:
+	var result: Dictionary = {}
+	var policy = load("res://scripts/game/gem_socket_policy.gd")
+	for row in rows.values():
+		if not row is Dictionary or int(row.get("grade", 0)) < 3 or str(row.get("category_filter", "")) not in ["weapon", "armor", "accessory"]:
+			continue
+		if not row.get("definition") is Dictionary or _positive_id(row.get("id")) <= 0:
+			continue
+		var costs: Dictionary = {}
+		for gem in gems:
+			if not gem is Dictionary or not gem.get("definition") is Dictionary or _positive_id(gem.get("id")) <= 0:
+				continue
+			var cost: int = policy.call("apply_gold_cost", gem.definition, row.definition)
+			if cost >= 0:
+				costs[str(int(gem.id))] = cost
+		result[str(int(row.id))] = costs
+	return result
+
+
+func _socket_budget_allows(cost: Variant, requested_reserve: Variant, view: Dictionary) -> bool:
+	var materials: Variant = view.get("materials", {})
+	if not materials is Dictionary:
+		return false
+	var gold: Variant = materials.get("5", materials.get(5, 0))
+	var ratio: Variant = control.get("gold_reserve_ratio", 0.12)
+	var minimum: Variant = control.get("gold_reserve_min", 200)
+	for value in [cost, requested_reserve, gold, ratio, minimum]:
+		if typeof(value) not in [TYPE_INT, TYPE_FLOAT] or not is_finite(value) or value < 0:
+			return false
+	if floor(cost) != cost or floor(gold) != gold or ratio > 1:
+		return false
+	return cost <= maxf(0.0, gold - maxf(float(requested_reserve), maxf(float(minimum), gold * ratio)))
+
 
 func _salvage_quote_matches(args: Array, selection: Dictionary, quote: Dictionary, view: Dictionary) -> bool:
 	if args.size() != 3 or not args[2] is Array:
@@ -705,6 +748,7 @@ func _export_opportunities() -> void:
 	out["socket_items"] = selectors.socket.call("equipment", raw, store)
 	out["socket_gems"] = selectors.socket.call("gems", raw, store)
 	out["socket_ready"] = clients.socket.call("ready")
+	out["socket_gold_costs"] = _socket_gold_costs(out.salvage, out.socket_gems)
 	var entry = load("res://scripts/ui/portal/dungeon_entry_controller.gd")
 	var unlocked_floor = int(host.call("_dungeon_unlocked_floor"))
 	var keys = int(entry.call("key_count", host))
@@ -749,6 +793,19 @@ func _annotate_steam(view: Dictionary) -> void:
 
 
 func _consumable_instance(id: int, view: Dictionary, salvage: bool) -> bool:
+	if salvage:
+		var by_owner: Variant = view.get("equipped_equipment_ids_by_char", {})
+		if not by_owner is Dictionary:
+			return false
+		for loadout in by_owner.values():
+			if not loadout is Dictionary:
+				return false
+			for worn_id in loadout.values():
+				if int(worn_id) == id:
+					return false
+		for worn_id in view.get("equipped_stone_instance_ids", []):
+			if int(worn_id) == id:
+				return false
 	for item in view.get("items", []):
 		if int(item.get("instance_id", item.get("id", 0))) != id:
 			continue
@@ -758,6 +815,8 @@ func _consumable_instance(id: int, view: Dictionary, salvage: bool) -> bool:
 		if int(item.get("state_flag", 0)) & (1 | 2 | 4 | 8 | 32 | 64):
 			return false
 		if salvage:
+			if str(item.get("category", "")) == "Material" and not bool(control.get("salvage_include_materials", false)):
+				return false
 			if not _salvage_grade_allowed(int(item.get("grade", 1))):
 				return false
 			if int(item.get("level", 1)) > 1 or int(item.get("enhance_level", 0)) > 0 or not item.get("socket_stats", []).is_empty() or _has_socket_materials(item):
@@ -776,6 +835,8 @@ func _consumable_instance(id: int, view: Dictionary, salvage: bool) -> bool:
 				return false
 			return true
 	else:
+		if not bool(control.get("salvage_include_materials", false)):
+			return false
 		for record in view.get("material_records", []):
 			if int(record.get("record_id", record.get("instance_id", record.get("id", 0)))) != id:
 				continue

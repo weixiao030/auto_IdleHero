@@ -1,5 +1,5 @@
 """Explain each module's current native prerequisites without dispatching work."""
-from .policy import MODULES, active_characters, reserve, capacity_goal, growth_budget, salvage_review, empty_socket_count
+from .policy import MODULES, active_characters, reserve, capacity_goal, growth_budget, salvage_review, empty_socket_count, socket_gem_choices, iid
 
 
 def module_reasons(snapshot, opportunities, config):
@@ -43,6 +43,34 @@ def module_reasons(snapshot, opportunities, config):
         'dungeon': '等待领取副本奖励并腾出奖励容量' if d.get('entry_blocked') else '等待服务器会话' if d.get('session_required') else '副本进行中' if snapshot.get('in_dungeon') else f'开放 {d.get("unlocked_floor", 0)} 层，钥匙 {d.get("keys", 0)}；等待储备门槛或挑战间隔',
         'consumables': '原生补给设置已生效，或等待现有药水／经验卷轴及解锁条件',
     }
+    if active and all(progress.get(owner, {}).get('skill_points') == 0 for owner in active):
+        reasons['skills'] = points+'；当前技能点已用完，等待升级获得新点数'
+    items = {iid(item): item for item in inv.get('items', [])}
+    gear = [items.get(int(ident), {}) for owner in active
+            for ident in inv.get('equipped_equipment_ids_by_char', {}).get(owner, {}).values()]
+    socket_gear = [item for item in gear if int(item.get('grade', 1)) >= 3]
+    empty_gear = [item for item in socket_gear if empty_socket_count(item) > 0]
+    if opportunities.get('socket_ready'):
+        if not socket_gear:
+            reasons['socket'] = '当前主力装备尚无可镶嵌槽'
+        elif not empty_gear:
+            reasons['socket'] = '主力装备宝石槽已填满'
+        elif not opportunities.get('socket_gems'):
+            reasons['socket'] = '主力装备有空槽，缺少可用宝石'
+        elif not any(str(iid(item)) in opportunities.get('socket_gold_costs', {}) for item in empty_gear):
+            reasons['socket'] = '等待原生镶嵌成本刷新，保持当前穿戴'
+        elif not any(socket_gem_choices(iid(item), snapshot, opportunities, config) for item in empty_gear):
+            reasons['socket'] = '镶嵌金币不足或需保留成长预算，保持当前穿戴'
+    gold_nodes = [row for row in opportunities.get('runes', [])
+                  if row.get('error', '') in ('', 'insufficient_materials')
+                  and not row.get('missing_requirements') and row.get('cost')
+                  and all(int(cost.get('item_data_id', 0)) == 5 for cost in row['cost'])]
+    if gold_nodes:
+        next_node = min(gold_nodes, key=lambda row: sum(cost.get('count', 0) for cost in row['cost']))
+        needed = sum(cost.get('count', 0) for cost in next_node['cost'])
+        reasons['runes'] += f'；{next_node.get("name", "下一节点")}需 {int(needed)} 金币'
+    if not config['salvage_include_materials']:
+        reasons['inventory'] += '；材料不参与分解'
     access = opportunities.get('enhancement_access', {})
     required = int(access.get('required_clear_map_id', 0))
     if not opportunities.get('enhancement_ready') and not required:

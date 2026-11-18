@@ -90,7 +90,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 if self.path.endswith('/preview'): result = engine.preview_salvage()
                 elif self.path.endswith('/start'): result = engine.start_salvage(value.get('token'))
-                else: result = engine.stop_salvage()
+                else: result = engine.stop_salvage(disable_auto=True)
             except ValueError as exc: return self.reply(409, {'error': str(exc)})
             return self.reply(200, {'ok': True, 'result': result})
         if self.path=='/api/run':

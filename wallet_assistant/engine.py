@@ -11,7 +11,7 @@ import threading
 import time
 import uuid
 from . import runtime, VERSION
-from .policy import Action, MODULES, normalize_config, plan, active_characters, equipped_ids, iid, power, reserve, capacity_goal, growth_budget, empty_socket_count, salvage_review, bag_pressure
+from .policy import Action, MODULES, normalize_config, plan, active_characters, equipped_ids, iid, power, reserve, capacity_goal, growth_budget, empty_socket_count, salvage_review, bag_pressure, socket_gem_choices
 
 def read_json(path, fallback=None):
     try: return json.loads(Path(path).read_text(encoding='utf-8-sig'))
@@ -234,6 +234,8 @@ class Engine:
             if 'modules' in changes: merged['modules'] = {**self.config['modules'], **changes['modules']}
             self.config = normalize_config(merged)
             self.running = self.config['auto_start']
+            if any(key in changes for key in ('salvage_include_materials', 'salvage_grades', 'salvage_allow_tradeable')):
+                self.salvage_preview = None
             runtime.atomic_json(self.data_dir/'config.json', self.config)
             self.config_stamp = (self.data_dir/'config.json').stat().st_mtime_ns
             self.publish_config()
@@ -301,6 +303,7 @@ class Engine:
             if not row['eligible']: protected[row['reason']] = protected.get(row['reason'], 0)+1
         identity = {'pid': self.snapshot['pid'], 'account_id': self.account_id, 'grades': grades,
                     'allow_tradeable': config['salvage_allow_tradeable'],
+                    'include_materials': config['salvage_include_materials'],
                     'candidates': candidates}
         token = hashlib.sha256(json.dumps(identity, sort_keys=True, ensure_ascii=False).encode('utf8')).hexdigest()
         return {**identity, 'token': token, 'time': time.time(), 'protected': protected,
@@ -313,6 +316,8 @@ class Engine:
 
     def start_salvage(self, token):
         with self.lock:
+            if self.config['auto_salvage']:
+                raise ValueError('请先关闭自动分解，再执行一次性预览。')
             if self.salvage_job and self.salvage_job['active']:
                 raise ValueError('独立分解正在运行。')
             preview = self.salvage_preview
@@ -333,12 +338,21 @@ class Engine:
             self.last_dispatch = 0
             return self.salvage_job
 
-    def stop_salvage(self, status='已停止；已提交请求继续核验'):
+    def stop_salvage(self, status='已停止；已提交请求继续核验', disable_auto=False):
         with self.lock:
+            if disable_auto and self.config['auto_salvage']:
+                self.update_config({'auto_salvage': False})
             if self.salvage_job:
                 self.salvage_job.update(active=False, status=status)
                 self.publish_config()
             return self.salvage_job
+
+    def automatic_salvage_action(self):
+        if self.snapshot.get('revision', 0) < 20:
+            return None
+        config = self._salvage_config(list(self.config['salvage_grades']))
+        return next((action for action in plan(self.snapshot, self.opportunities, self.catalog, config)
+                     if action.module == 'inventory' and self.action_ready(action)), None)
 
     def standalone_salvage_action(self):
         job = self.salvage_job
@@ -756,16 +770,17 @@ class Engine:
                 return Action('enhancement', 'enhancement_execute', [item_id], f"强化 {item.get('name', '装备')}", 200)
             if job['module'] == 'socket':
                 target = next((x for x in o.get('socket_items', []) if int(x['id']) == item_id), {})
-                gems = o.get('socket_gems', [])
+                gems = socket_gem_choices(item_id, self.snapshot, o, self.config)
                 if not target.get('empty_slots') or not gems or not o.get('socket_ready'):
                     self.restore_maintenance()
                     return self.maintenance_equipment_action(job, True)
                 gem = max(gems, key=lambda x: int(x.get('grade', 1)))
-                return Action('socket', 'socket', [item_id, int(target['empty_slots'][0]), int(gem['id'])],
+                _, keep = reserve(inv, growth_budget(self.snapshot, o, self.config))
+                return Action('socket', 'socket', [item_id, int(target['empty_slots'][0]), int(gem['id']), keep],
                               f"为 {item.get('name', '装备')} 镶嵌宝石", 200)
             self.restore_maintenance()
             return self.maintenance_equipment_action(job, True)
-        if not self.running: return None
+        if not self.running or not opportunities_ready(self.snapshot, o): return None
         for owner in active_characters(self.snapshot):
             for raw_id in inv.get('equipped_equipment_ids_by_char', {}).get(owner, {}).values():
                 item_id = int(raw_id)
@@ -779,7 +794,8 @@ class Engine:
                             (f'maintenance:enhancement:{item_id}', f'enhancement_execute:[{item_id}]', f'enhancement_quote:[{item_id}]'))
                         and int(item.get('enhance_level', 0)) < min(15, max(3, int(inv.get('character_progress_by_char', {}).get(owner, {}).get('level', 1))//10))):
                     module = 'enhancement'
-                elif (self.config['modules']['socket'] and o.get('socket_ready') and o.get('socket_gems')
+                elif (self.config['modules']['socket'] and o.get('socket_ready')
+                        and socket_gem_choices(item_id, self.snapshot, o, self.config)
                         and self.cooldowns.get(f'maintenance:socket:{item_id}', 0) <= now
                         and empty_socket_count(item) > 0):
                     module = 'socket'
@@ -961,6 +977,15 @@ class Engine:
                 self.status = self.salvage_job['status']
                 if action: self.dispatch(action)
                 return
+            if self.config['auto_salvage']:
+                action = self.automatic_salvage_action()
+                if action:
+                    self.status = '独立自动分解中'
+                    self.dispatch(action)
+                    return
+                if not self.running:
+                    self.status = '独立自动分解：等待符合设置的剩余物品'
+                    return
             if not self.running and not self.inspection_requested: return
             eligible=[a for a in self.actions if self.action_ready(a)]
             now=time.time()

@@ -23,6 +23,7 @@ DEFAULTS = {
     'rune_priority': ['exp', 'gold', 'power', 'chest'],
     'prioritize_capacity': True, 'capacity_trigger_ratio': 0.85,
     'capacity_saving_ratio': 0.25, 'salvage_allow_tradeable': False,
+    'salvage_include_materials': False, 'auto_salvage': False,
     'performance_mode': False, 'performance_fps': 10, 'minimal_effects': True,
     'modules': {key: True for key in MODULES},
 }
@@ -290,6 +291,26 @@ def growth_budget(snapshot, opportunities, config, capacity=None):
     available = max(0, gold-base)
     saving = gold_needed if gold_needed <= available else available*config['capacity_saving_ratio']
     return {**config, '_capacity_gold_reserve': base+saving}
+
+def socket_gem_choices(item_id, snapshot, opportunities, config):
+    """Use native costs, including the current expansion and growth reserve."""
+    costs = opportunities.get('socket_gold_costs', {}).get(str(item_id), {})
+    if not isinstance(costs, dict): return []
+    gold, keep = reserve(snapshot.get('inventory', {}), growth_budget(snapshot, opportunities, config))
+    choices = []
+    for gem in opportunities.get('socket_gems', []):
+        if not isinstance(gem, dict): continue
+        ident, count, grade = gem.get('id'), gem.get('count'), gem.get('grade')
+        if any(type(value) not in (int, float) or not math.isfinite(value) or value <= 0 or int(value) != value
+               for value in (ident, count, grade)):
+            continue
+        cost = costs.get(str(int(ident)))
+        if (type(cost) not in (int, float) or not math.isfinite(cost) or cost < 0 or int(cost) != cost
+                or cost > max(0, gold-keep)):
+            continue
+        choices.append({**gem, 'gold_cost': int(cost)})
+    return choices
+
 
 def has_socket_materials(item):
     """Keep real investments and unknown data, but ignore empty native slots."""
@@ -634,7 +655,9 @@ def salvage_review(snapshot, opportunities, config, collection_ids=()):
         item = materials.get(ident) if category == 'material' else items.get(ident)
         reason = ''
         if only is not None and ident not in only: continue
-        if not item:
+        if category == 'material' and not config['salvage_include_materials']:
+            reason = '材料分解已关闭'
+        elif not item:
             reason = '库存记录已变化'
         elif ident in equipped:
             reason = '已穿戴'
