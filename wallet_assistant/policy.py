@@ -418,6 +418,43 @@ def protected_items(snapshot, config, *, allow_tradeable=False):
         protected.update(assigned)
     return protected
 
+def equipment_upgrade_actions(snapshot, opportunities, config, *, all_upgrades=False):
+    """Select replacements once so growth and every disposal path agree."""
+    inv = snapshot.get('inventory', {})
+    items = {iid(row): row for row in inv.get('items', [])}
+    used = equipped_ids(inv)
+    by_char = inv.get('equipped_equipment_ids_by_char', {})
+    active = active_characters(snapshot)
+    heroes = snapshot.get('playable_characters', {})
+    actions = []
+    eligible = {int(x['instance_id']): x['owners'] for x in opportunities.get('equipment_eligibility', [])}
+    for owner in active:
+        equipped = by_char.get(owner, {})
+        best = {}
+        candidates = []
+        for id, owners in eligible.items():
+            item = items.get(id, {})
+            if owner not in owners or not item or item.get('unidentified') or item.get('stored'): continue
+            if id in used and id not in equipped.values(): continue
+            name = slot(item)
+            # Each ring slot needs its own candidate; the strongest worn ring is not a replacement.
+            if name == 'Ring' and id in equipped.values(): continue
+            candidates.append((name, item))
+            if name not in best or power(item) > power(best[name]): best[name] = item
+        for name, item in candidates if all_upgrades else best.items():
+            if name == 'Ring':
+                ring_names = [k for k in equipped if k.startswith('Ring')]
+                weakest_name = min(ring_names, key=lambda k: power(items.get(int(equipped[k]), {}))) if len(ring_names)>=2 else ''
+                current = items.get(int(equipped.get(weakest_name, 0)), {})
+                if iid(item) in equipped.values(): continue
+            else: current = items.get(int(equipped.get(name, 0)), {})
+            if iid(item) == iid(current): continue
+            if power(item) > power(current) * (1+config['equipment_improvement_ratio']):
+                actions.append(Action('equipment', 'equipment_equip', [owner, iid(item)], f"{heroes.get(owner,{}).get('char',owner)} 换装 · {item.get('name','')}", 140,
+                                  {'equipment': [owner, iid(item)]}))
+    return actions
+
+
 def plan(snapshot, opportunities, catalog, config):
     if not snapshot.get('connected') or snapshot.get('phase') != 'ready': return []
     if config['modules']['formation'] and snapshot.get('startup_selection_pending'):
@@ -440,6 +477,7 @@ def plan(snapshot, opportunities, catalog, config):
     budget = growth_budget(snapshot, opportunities, config, capacity)
     gold, keep = reserve(inv, budget)
     protected = protected_items(snapshot, config)
+    protected.update(action.args[1] for action in equipment_upgrade_actions(snapshot, opportunities, config, all_upgrades=True))
     material_reserve = salvage_material_reserve_ids(snapshot, opportunities)
     defs = {int(x['id']): x for x in catalog.get('Items', [])}
     if enabled['mainline'] and snapshot.get('stage_hold'):
@@ -483,29 +521,7 @@ def plan(snapshot, opportunities, catalog, config):
                               {'skill': [owner, row['id'], row['level']+1]}))
         # This native version activates every learned assist skill automatically.
     if enabled['equipment']:
-        eligible = {int(x['instance_id']): x['owners'] for x in opportunities.get('equipment_eligibility', [])}
-        for owner in active:
-            equipped = by_char.get(owner, {})
-            best = {}
-            for id, owners in eligible.items():
-                item = items.get(id, {})
-                if owner not in owners or not item or item.get('unidentified') or item.get('stored'): continue
-                if id in used and id not in equipped.values(): continue
-                name = slot(item)
-                # Each ring slot needs its own candidate; the strongest worn ring is not a replacement.
-                if name == 'Ring' and id in equipped.values(): continue
-                if name not in best or power(item) > power(best[name]): best[name] = item
-            for name, item in best.items():
-                if name == 'Ring':
-                    ring_names = [k for k in equipped if k.startswith('Ring')]
-                    weakest_name = min(ring_names, key=lambda k: power(items.get(int(equipped[k]), {}))) if len(ring_names)>=2 else ''
-                    current = items.get(int(equipped.get(weakest_name, 0)), {})
-                    if iid(item) in equipped.values(): continue
-                else: current = items.get(int(equipped.get(name, 0)), {})
-                if iid(item) == iid(current): continue
-                if power(item) > power(current) * (1+config['equipment_improvement_ratio']):
-                    out.append(Action('equipment', 'equipment_equip', [owner, iid(item)], f"{heroes.get(owner,{}).get('char',owner)} 换装 · {item.get('name','')}", 140,
-                                      {'equipment': [owner, iid(item)]}))
+        out.extend(equipment_upgrade_actions(snapshot, opportunities, config))
     if enabled['identify']:
         unidentified = [id for id,item in items.items() if item.get('unidentified') and not item.get('stored') and not int(item.get('state_flag', 0)) & (2|4|32|64)]
         if unidentified: out.append(Action('identify', 'identify', unidentified[:160], f'鉴定 {len(unidentified[:160])} 件装备', 150))
@@ -650,6 +666,7 @@ def salvage_review(snapshot, opportunities, config, collection_ids=()):
     inv = snapshot.get('inventory', {})
     protected = protected_items(snapshot, config, allow_tradeable=config['salvage_allow_tradeable'])
     equipped = equipped_ids(inv)
+    upgrades = {action.args[1] for action in equipment_upgrade_actions(snapshot, opportunities, config, all_upgrades=True)}
     items = {iid(row): row for row in inv.get('items', [])}
     materials = {int(row.get('record_id', row.get('instance_id', row.get('id', 0)))): row
                  for row in inv.get('material_records', [])}
@@ -676,6 +693,8 @@ def salvage_review(snapshot, opportunities, config, collection_ids=()):
             reason = '可交易保护或交易信息未就绪'
         elif int(item.get('enhance_level', 0)) > 0 or item.get('socket_stats') or has_socket_materials(item) or int(row.get('level', 1)) > 1 or row.get('option', {}).get('slots'):
             reason = '强化或镶嵌投入'
+        elif ident in upgrades:
+            reason = '留作战力换装'
         elif ident in protected:
             reason = '当前或下一阶段备用装备'
         elif ident in collection_ids:

@@ -178,7 +178,17 @@ def install_connection(target):
 
 def snapshot(directory=None, pid=None, created=None):
     try:
-        value = json.loads(((directory or DATA/'runtime')/'snapshot.json').read_text(encoding='utf8'))
+        path = (directory or DATA/'runtime')/'snapshot.json'
+        for attempt in range(3):
+            try:
+                payload = path.read_text(encoding='utf8')
+                break
+            except OSError:
+                if attempt == 2: raise
+                # Windows replacement can briefly hide or hold the file. Do not
+                # reuse an old snapshot or retry invalid content/identity.
+                time.sleep(.01)
+        value = json.loads(payload)
         if not isinstance(value, dict): raise ValueError('invalid snapshot')
         stamp = value.get('time_unix', 0)
         if type(stamp) not in (int, float) or not math.isfinite(stamp): raise ValueError('invalid time')

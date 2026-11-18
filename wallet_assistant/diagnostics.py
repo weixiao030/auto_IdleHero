@@ -21,6 +21,7 @@ def module_reasons(snapshot, opportunities, config):
     usable = sum(r['eligible'] for r in rows)
     grades = sum(r['reason'] == '品质未勾选' for r in rows)
     trade = sum(r['reason'] == '可交易保护或交易信息未就绪' for r in rows)
+    upgrades = sum(r['reason'] == '留作战力换装' for r in rows)
     all_recipes = opportunities.get('recipes', [])
     craft = []
     for owner in active:
@@ -52,7 +53,7 @@ def module_reasons(snapshot, opportunities, config):
         'socket': '原生镶嵌尚未就绪' if not opportunities.get('socket_ready') else '缺少可用宝石' if not opportunities.get('socket_gems') else '等待有空槽的主力装备与维护间隔',
         'collection': '原生图鉴尚未就绪' if not collection.get('ready') else '图鉴请求结算中' if collection.get('busy') else '暂无未登记且可安全消耗的图鉴候选',
         'loot': f'待领奖励 {loot}；背包已满，先分解、图鉴或扩容' if loot and free == 0 else f'待领奖励 {loot}，装备空位 {free}',
-        'inventory': f'可分解 {usable} 条；品质未勾选 {grades} 条，可交易保护 {trade} 条，其余为穿戴、投入或备用保护',
+        'inventory': f'可分解 {usable} 条；待换装 {upgrades} 条，品质未勾选 {grades} 条，可交易保护 {trade} 条，其余为穿戴、投入或备用保护',
         'dungeon': '等待领取副本奖励并腾出奖励容量' if d.get('entry_blocked') else '等待服务器会话' if d.get('session_required') else '副本进行中' if snapshot.get('in_dungeon') else f'开放 {d.get("unlocked_floor", 0)} 层，钥匙 {d.get("keys", 0)}；等待储备门槛或挑战间隔',
         'consumables': '原生补给设置已生效，或等待现有药水／经验卷轴及解锁条件',
     }
