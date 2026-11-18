@@ -977,17 +977,19 @@ class Engine:
                 self.status = self.salvage_job['status']
                 if action: self.dispatch(action)
                 return
+            automatic_salvage = None
             if self.config['auto_salvage']:
-                action = self.automatic_salvage_action()
-                if action:
-                    self.status = '独立自动分解中'
-                    self.dispatch(action)
-                    return
+                automatic_salvage = self.automatic_salvage_action()
                 if not self.running:
-                    self.status = '独立自动分解：等待符合设置的剩余物品'
+                    self.status = '独立自动分解中' if automatic_salvage else '独立自动分解：等待符合设置的剩余物品'
+                    if automatic_salvage: self.dispatch(automatic_salvage)
                     return
             if not self.running and not self.inspection_requested: return
             eligible=[a for a in self.actions if self.action_ready(a)]
+            # While growth runs, use the same priorities and aging as every
+            # other module. Paused independent cleanup remains exclusive.
+            if automatic_salvage and all(a.key != automatic_salvage.key for a in eligible):
+                eligible.append(automatic_salvage)
             now=time.time()
             eligible.sort(key=lambda a:a.priority+min(90,max(0,now-self.module_last_run.get(a.module,self.started))/3),reverse=True)
             # Capacity recovery must not lose to aging bonuses on routine work.
@@ -998,7 +1000,10 @@ class Engine:
             action=eligible[0] if eligible and eligible[0].priority>=75 else self.maintenance_action()
             if not action and eligible: action=eligible[0]
             self.inspection_requested = False
-            if action: self.dispatch(action)
+            if action:
+                if automatic_salvage and action.key == automatic_salvage.key:
+                    self.status = '独立自动分解中'
+                self.dispatch(action)
 
     def run(self):
         while not self.stop_event.is_set():
