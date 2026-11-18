@@ -84,6 +84,10 @@ def power(item):
     return max(0, number(item.get('power', item.get('stone_attack_power', 0))))
 def stone_power(item): return power(item) / max(.1, number(item.get('cooldown_multiplier', 1), 1))
 
+def recipe_owner(row):
+    popup = row.get('target', {}).get('popupArgs', {})
+    return popup.get('JobWeaponCharacterKey', popup.get('JobWeaponOwner', ''))
+
 def valid_stone_merge_ids(opportunities, items, used):
     """Return only one current, unprotected merge group from native opportunities."""
     raw_ids = opportunities.get('stone_merge_ids', [])
@@ -572,7 +576,7 @@ def plan(snapshot, opportunities, catalog, config):
                         out.append(Action('collection','collection_register',[str(group['id']),str(row['key']),id],f"图鉴登记 · {row.get('item_name','')}",186 if bag_pressure(snapshot, config) else 65))
                         collection_item_ids.add(id)
                         break
-    if enabled['craft']:
+    if enabled['craft'] and opportunities.get('craft_state', {}).get('ready', True):
         for row in opportunities.get('recipes', []):
             if not row.get('executable') or bag_pressure(snapshot, config): continue
             craft_gold = sum(number(m.get('required')) for m in row.get('plan', {}).get('materials', [])
@@ -580,7 +584,7 @@ def plan(snapshot, opportunities, catalog, config):
             if craft_gold > max(0, gold-keep): continue
             target = row.get('target', {})
             target_slot = 'Weapon' if 'JobWeapon' in target.get('tags', []) else target.get('type','')
-            job = target.get('popupArgs', {}).get('JobWeaponCharacterKey', target.get('popupArgs', {}).get('JobWeaponOwner',''))
+            job = recipe_owner(row)
             for owner in active:
                 if job and job != owner: continue
                 if int(row['required_level']) > int(progress.get(owner,{}).get('level',1)): continue
@@ -593,7 +597,10 @@ def plan(snapshot, opportunities, catalog, config):
                 if int(existing.get('requiredLevel',0)) > int(row['required_level']): continue
                 if int(existing.get('requiredLevel',0)) == int(row['required_level']) and int(existing.get('grade',1)) >= config['craft_target_grade']: continue
                 # Skip obsolete tiers if a higher usable recipe exists, even when waiting for its materials.
-                if any(r.get('subtype')==row['subtype'] and int(r['required_level'])>int(row['required_level']) and int(r['required_level'])<=int(progress.get(owner,{}).get('level',1)) for r in opportunities.get('recipes',[])): continue
+                if any(r.get('subtype')==row['subtype'] and (not recipe_owner(r) or recipe_owner(r)==owner)
+                       and int(r['required_level'])>int(row['required_level'])
+                       and int(r['required_level'])<=int(progress.get(owner,{}).get('level',1))
+                       for r in opportunities.get('recipes',[])): continue
                 out.append(Action('craft','craft',[int(row['recipe_id']),False,0],f"魔方制造 · {target.get('name','')}（{owner}）",55+int(row['required_level'])/10))
     if enabled['inventory']:
         # Collection candidates get first use of surplus; retain material for usable recipes.

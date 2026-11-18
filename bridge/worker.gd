@@ -1,6 +1,6 @@
 extends Node
 
-const REVISION = 20
+const REVISION = 21
 var data_dir: String
 var host: Node
 var gateway: Object
@@ -467,7 +467,13 @@ func _execute(request: Dictionary) -> Variant:
 				return {"ok": false, "error": "protected_collection_item"}
 			return host.get("item_collection_client").callv("register_slot", args)
 		"craft":
-			clients.craft.call("clear_result")
+			if args.size() != 3 or _positive_id(args[0]) <= 0 or typeof(args[1]) != TYPE_BOOL:
+				return {"ok": false, "error": "invalid_arguments"}
+			if typeof(args[2]) not in [TYPE_INT, TYPE_FLOAT] or not is_finite(args[2]) or floor(args[2]) != args[2] or args[2] < 0 or args[2] > 10 or (not args[1] and args[2] != 0):
+				return {"ok": false, "error": "invalid_arguments"}
+			var craft_state: Dictionary = _prepare_craft_client()
+			if not craft_state.get("ready", false):
+				return {"ok": false, "error": "craft_" + str(craft_state.get("reason", "unavailable"))}
 			var descriptor: Dictionary = native_catalog.call("recipe_descriptor", int(args[0]))
 			var plan: Dictionary = selectors.craft.call("material_plan", descriptor, host.get("progression_selectors").call("_inventory_view_snapshot").duplicate(true), bool(args[1]), int(args[2]))
 			if not clients.craft.call("can_execute", descriptor, plan):
@@ -520,6 +526,41 @@ func _execute(request: Dictionary) -> Variant:
 			return {"ok": true, "entered_map_id": int(host.get("sim").get("map_id")), "in_dungeon": host.call("_is_dungeon_map", int(host.get("sim").get("map_id")))}
 
 	return {"ok": false, "error": "unsupported_action"}
+
+func _prepare_craft_client() -> Dictionary:
+	var client = clients.get("craft")
+	if not is_instance_valid(client):
+		return {"ready": false, "reason": "unavailable"}
+	for method in ["has_uncertain_operation", "reconcile_correlated_sources", "clear_settled_error"]:
+		if not client.has_method(method):
+			return {"ready": false, "reason": "unavailable"}
+	var pending: Variant = client.get("pending")
+	var result: Variant = client.get("result")
+	var uncertain: Variant = client.call("has_uncertain_operation")
+	if typeof(pending) != TYPE_INT or pending < 0 or not result is Dictionary or typeof(uncertain) != TYPE_BOOL:
+		return {"ready": false, "reason": "unavailable"}
+	if pending > 0:
+		return {"ready": false, "reason": "pending"}
+	if uncertain:
+		return {"ready": false, "reason": "outcome_unknown"}
+	# The native client only acknowledges a receipt whose source set matched.
+	# Receipt files remain available for the scheduler's independent verification.
+	if not result.is_empty() and client.call("reconcile_correlated_sources") != true:
+		return {"ready": false, "reason": "result_unconfirmed"}
+	client.call("clear_settled_error")
+	return {"ready": true, "reason": "ready"}
+
+
+func _craft_opportunities(projection: Dictionary) -> Dictionary:
+	var descriptors: Array = native_catalog.get("recipe_entries")
+	var plans: Array = selectors.craft.call("material_plans", descriptors, projection)
+	var recipes: Array = []
+	var state: Dictionary = _prepare_craft_client()
+	for index in range(descriptors.size()):
+		var descriptor: Dictionary = descriptors[index]
+		recipes.append({"recipe_id": descriptor.recipe_id, "target_id": descriptor.target_id, "target": descriptor.target, "required_level": descriptor.required_level, "category": descriptor.category, "subtype": descriptor.subtype, "plan": plans[index], "executable": state.ready and clients.craft.call("can_execute", descriptor, plans[index])})
+	return {"craft_state": state, "recipes": recipes}
+
 
 func _socket_gold_costs(rows: Dictionary, gems: Array) -> Dictionary:
 	var result: Dictionary = {}
@@ -730,13 +771,7 @@ func _export_opportunities() -> void:
 		if not owners.is_empty():
 			candidates.append({"instance_id": item.get("instance_id"), "owners": owners})
 	out["equipment_eligibility"] = candidates
-	var descriptors: Array = native_catalog.get("recipe_entries")
-	var plans: Array = selectors.craft.call("material_plans", descriptors, projection)
-	var recipes: Array = []
-	for index in range(descriptors.size()):
-		var descriptor: Dictionary = descriptors[index]
-		recipes.append({"recipe_id": descriptor.recipe_id, "target_id": descriptor.target_id, "target": descriptor.target, "required_level": descriptor.required_level, "category": descriptor.category, "subtype": descriptor.subtype, "plan": plans[index], "executable": clients.craft.call("can_execute", descriptor, plans[index])})
-	out["recipes"] = recipes
+	out.merge(_craft_opportunities(projection))
 	out["salvage"] = selectors.inventory.call("rows", raw, store)
 	out["salvage_can_execute"] = clients.disassembly.call("can_execute")
 	out["salvage_quote"] = clients.disassembly.get("quote")

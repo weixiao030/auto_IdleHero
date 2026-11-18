@@ -1,5 +1,5 @@
 """Explain each module's current native prerequisites without dispatching work."""
-from .policy import MODULES, active_characters, reserve, capacity_goal, growth_budget, salvage_review, empty_socket_count, socket_gem_choices, iid
+from .policy import MODULES, active_characters, reserve, capacity_goal, growth_budget, salvage_review, empty_socket_count, socket_gem_choices, iid, recipe_owner
 
 
 def module_reasons(snapshot, opportunities, config):
@@ -21,7 +21,20 @@ def module_reasons(snapshot, opportunities, config):
     usable = sum(r['eligible'] for r in rows)
     grades = sum(r['reason'] == '品质未勾选' for r in rows)
     trade = sum(r['reason'] == '可交易保护或交易信息未就绪' for r in rows)
-    craft = opportunities.get('recipes', [])
+    all_recipes = opportunities.get('recipes', [])
+    craft = []
+    for owner in active:
+        level = progress.get(owner, {}).get('level', 0)
+        usable_recipes = []
+        for row in all_recipes:
+            job = recipe_owner(row)
+            if (not job or job == owner) and 0 < row.get('required_level', 0) <= level:
+                usable_recipes.append(row)
+        for row in usable_recipes:
+            if not any(other.get('subtype') == row.get('subtype')
+                       and other.get('required_level', 0) > row.get('required_level', 0)
+                       for other in usable_recipes):
+                craft.append(row)
     missing = sorted({str(m.get('definition', {}).get('name', m.get('item_data_id', '材料')))
                       for r in craft for m in r.get('plan', {}).get('materials', []) if not m.get('sufficient')})
     collection = opportunities.get('collections', {})
@@ -45,6 +58,15 @@ def module_reasons(snapshot, opportunities, config):
     }
     if active and all(progress.get(owner, {}).get('skill_points') == 0 for owner in active):
         reasons['skills'] = points+'；当前技能点已用完，等待升级获得新点数'
+    craft_state = opportunities.get('craft_state', {})
+    craft_waits = {
+        'pending': '制造请求正在等待原生结算',
+        'outcome_unknown': '上次制造结果不明，保留原请求并等待核验',
+        'result_unconfirmed': '上次制造结果尚未通过原生来源核验，等待确认',
+        'unavailable': '等待原生制造客户端就绪',
+    }
+    if craft_state.get('reason') in craft_waits:
+        reasons['craft'] = craft_waits[craft_state['reason']]
     items = {iid(item): item for item in inv.get('items', [])}
     gear = [items.get(int(ident), {}) for owner in active
             for ident in inv.get('equipped_equipment_ids_by_char', {}).get(owner, {}).values()]

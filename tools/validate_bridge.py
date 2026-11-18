@@ -587,6 +587,10 @@ func _ready() -> void:
     checks += 1
     worker.host = null
     socket_host.free()
+    var craft_checks = load("res://craft_check.gd").new().run(worker)
+    if craft_checks < 0:
+        worker.free()
+        return
     var connection_checks = _connection_checks(worker)
     var fixture = load("res://loading_check.gd").new()
     var loading_checks = fixture.run(worker)
@@ -596,6 +600,7 @@ func _ready() -> void:
     print("[WalletHeroesAssistant] consumption checks passed: ", checks)
     print("[WalletHeroesAssistant] connection checks passed: ", connection_checks)
     print("[WalletHeroesAssistant] loading checks passed: ", loading_checks)
+    print("[WalletHeroesAssistant] craft checks passed: ", craft_checks)
 
 func _connection_checks(worker) -> int:
     var checks = 0
@@ -683,6 +688,7 @@ func _connection_checks(worker) -> int:
 ''',
         'res://scripts/game/gem_socket_policy.gd':b'extends RefCounted\nstatic func apply_gold_cost(gem, _target):\n    return int(gem.get("fixture_cost", -1))\n',
         'res://loading_check.gd':(ROOT/'tools/fixtures/loading_check.gd').read_bytes(),
+        'res://craft_check.gd':(ROOT/'tools/fixtures/craft_check.gd').read_bytes(),
         'res://.godot/global_script_class_cache.cfg': b'list=[]\n',
     })
     p = subprocess.run([str(engine),'--headless','--main-pack',str(LAB/'syntax.pck'),'--quit-after','3'],capture_output=True,timeout=25,env={**os.environ,"LOCALAPPDATA":str(LAB/"data")})
@@ -692,12 +698,13 @@ func _connection_checks(worker) -> int:
     if p.returncode or any(x in text for x in ['SCRIPT ERROR','Parse Error','Failed to load script']):
         raise SystemExit(1)
     if '[WalletHeroesAssistant] loader revision 2' not in text: raise SystemExit('Observer missing')
-    if 'const REVISION = 20' not in (ROOT/'bridge/worker.gd').read_text(encoding='utf8'): raise SystemExit('Multi-instance bridge revision missing')
+    if 'const REVISION = 21' not in (ROOT/'bridge/worker.gd').read_text(encoding='utf8'): raise SystemExit('Multi-instance bridge revision missing')
     if '[WalletHeroesAssistant] consumption checks passed: 91' not in text: raise SystemExit('Consumption boundary checks failed')
     if '[WalletHeroesAssistant] connection checks passed: 33' not in text: raise SystemExit('Connection boundary checks failed')
     if '[WalletHeroesAssistant] loading checks passed: 130' not in text: raise SystemExit('Loading boundary checks failed')
-    report = {name:int(re.search(r'\[WalletHeroesAssistant\] '+name+r' checks passed: (\d+)', text).group(1)) for name in ('consumption','connection','loading')}
+    if '[WalletHeroesAssistant] craft checks passed: 17' not in text: raise SystemExit('Craft lifecycle checks failed')
+    report = {name:int(re.search(r'\[WalletHeroesAssistant\] '+name+r' checks passed: (\d+)', text).group(1)) for name in ('consumption','connection','loading','craft')}
     report['total'] = sum(report.values())
-    report['worker_revision'] = 20
+    report['worker_revision'] = 21
     (ROOT/'runtime/bridge-validation.json').write_text(json.dumps(report,indent=2),encoding='utf8')
     print(f"Isolated observer syntax passed; {report['total']} boundary checks passed.")

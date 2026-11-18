@@ -448,6 +448,8 @@ def run(output: Path):
     growth_recovery_checks(check)
     from tools.salvage_control_tests import run as salvage_control_checks
     salvage_control_checks(check)
+    from tools.craft_lifecycle_tests import run as craft_lifecycle_checks
+    craft_lifecycle_checks(check)
     output.write_text(json.dumps({'passed':len(tests),'tests':tests},ensure_ascii=False,indent=2),encoding='utf8')
     print(f'{len(tests)} regression scenarios passed; {output}')
 
