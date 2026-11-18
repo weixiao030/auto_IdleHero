@@ -48,7 +48,7 @@ def main():
         if docx.testzip() is not None or 'word/document.xml' not in docx.namelist():
             raise ValueError('Word 教程结构损坏')
     bridge = json.loads((ROOT/'runtime/bridge-validation.json').read_text(encoding='utf8'))
-    if bridge.get('worker_revision') != 21 or bridge.get('total') != 271:
+    if bridge.get('worker_revision') != 22 or bridge.get('total') != 283:
         raise ValueError('桥接检查报告与当前源码不一致')
     release = {
         'version': VERSION, 'worker_revision': bridge['worker_revision'],
@@ -105,7 +105,7 @@ Word 教程沿用 0.4.0，启动与日常操作同样适用于当前版本。
 已通过：{source['passed']} 项源码回归、{packaged['passed']} 项 EXE 包内隔离自检、{bridge['total']} 项 Godot 桥接边界检查，以及进程独立目录创建和快照写入检查。
 隔离回归覆盖本机与多个沙盒独立并行调度、同一沙盒不同 PID、命令和回执隔离、重启恢复，以及自动重连默认关闭。
 
-本次修复：独立自动分解有候选时每轮提前抢占成长，导致技能、星座、开箱和换装可能长期没有调度机会。现在成长开启时共享优先级与等待补偿，满包仍先恢复容量；暂停成长后保持独立运行。新增14项真实Engine.tick回归。沿用材料默认关闭、全角色穿戴与待换装升级保护、制造续接和快照重读。当前新冲突场景由隔离调度验证，不能代替全部真实账号／后期消费；详细证据和边界见项目 VALIDATION.md。
+本次修复：强化原生条件缺失时主动查询游戏现有的只读 enhancement.access；查询返回已知条件后交回原生解锁判定，失败或结果不明时五分钟后重新读取，不重放原请求。关闭强化模块不查询，旧桥接未明确支持时不发请求。保留材料默认关闭、全角色穿戴与待换装升级硬保护、自动分解共享调度、制造续接和快照重读。新增13项源码回归与12项原生提交边界检查。查询成功不代表已实际强化；详细实机证据和后期覆盖边界见项目 VALIDATION.md。
 
 历史实机验收（2026-11-16，本次未重复执行）：当前沙盒连接和状态刷新；一次只读邮件同步由原生成功回执核验；16 个网页模块逐一关闭和恢复开启，保存生效；重新检测、显示选项、桌面与 390px 窄屏布局通过，浏览器无错误或警告。
 核验游戏 buildid 26636673，原生日志版本 v1.11.205。无需进一步逆向；如后续需要逆向，按约定使用 IDA。

@@ -97,7 +97,9 @@ def module_reasons(snapshot, opportunities, config):
     access = opportunities.get('enhancement_access', {})
     required = int(access.get('required_clear_map_id', 0))
     if not opportunities.get('enhancement_ready') and not required:
-        reasons['enhancement'] = '游戏尚未提供强化解锁条件，等待原生系统开放'
+        reasons['enhancement'] = ('等待查询原生强化解锁条件；无条件返回时定时重查'
+                                  if opportunities.get('enhancement_access_query_supported') is True
+                                  else '游戏尚未提供强化解锁条件，等待原生系统开放')
     if not opportunities.get('enhancement_ready') and required > 0:
         index = required-500101
         stage = f'{index//10+1}-{index%10+1}' if index >= 0 else str(required)

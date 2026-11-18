@@ -1,6 +1,6 @@
 extends Node
 
-const REVISION = 21
+const REVISION = 22
 var data_dir: String
 var host: Node
 var gateway: Object
@@ -479,6 +479,16 @@ func _execute(request: Dictionary) -> Variant:
 			if not clients.craft.call("can_execute", descriptor, plan):
 				return {"ok": false, "error": "craft_not_ready", "plan": plan}
 			return clients.craft.call("execute", descriptor, plan, sequence)
+		"enhancement_access":
+			if not args.is_empty():
+				return {"ok": false, "error": "invalid_arguments"}
+			var access_state: Dictionary = _enhancement_access_opportunities()
+			if not access_state.enhancement_access_query_supported:
+				return {"ok": false, "error": "enhancement_access_unavailable"}
+			if int(access_state.enhancement_access.get("required_clear_map_id", 0)) > 0:
+				return {"ok": false, "error": "enhancement_access_already_known"}
+			var access_request: int = int(gateway.call("send_enhancement_access"))
+			return {"ok": access_request > 0, "request_id": access_request, "error": "" if access_request > 0 else "enhancement_access_not_ready"}
 		"enhancement_quote":
 			return clients.enhancement.call("preview", int(args[0]))
 		"enhancement_execute":
@@ -526,6 +536,12 @@ func _execute(request: Dictionary) -> Variant:
 			return {"ok": true, "entered_map_id": int(host.get("sim").get("map_id")), "in_dungeon": host.call("_is_dungeon_map", int(host.get("sim").get("map_id")))}
 
 	return {"ok": false, "error": "unsupported_action"}
+
+func _enhancement_access_opportunities() -> Dictionary:
+	var supported: bool = is_instance_valid(gateway) and gateway.has_method("enhancement_access_snapshot") and gateway.has_method("send_enhancement_access")
+	var access: Dictionary = gateway.call("enhancement_access_snapshot") if is_instance_valid(gateway) and gateway.has_method("enhancement_access_snapshot") else {}
+	return {"enhancement_access": access, "enhancement_access_query_supported": supported}
+
 
 func _prepare_craft_client() -> Dictionary:
 	var client = clients.get("craft")
@@ -779,7 +795,7 @@ func _export_opportunities() -> void:
 	out["enhancement_items"] = selectors.enhancement.call("equipment", raw, store)
 	out["enhancement_quote"] = clients.enhancement.get("quote")
 	out["enhancement_ready"] = clients.enhancement.call("ready")
-	out["enhancement_access"] = gateway.call("enhancement_access_snapshot") if gateway.has_method("enhancement_access_snapshot") else {}
+	out.merge(_enhancement_access_opportunities())
 	out["socket_items"] = selectors.socket.call("equipment", raw, store)
 	out["socket_gems"] = selectors.socket.call("gems", raw, store)
 	out["socket_ready"] = clients.socket.call("ready")

@@ -528,10 +528,12 @@ class Engine:
         if action.kind == 'craft': delay = 15 if success else 180
         if action.kind in ['enhancement_quote', 'salvage_quote']: delay = 8 if success else 120
         if action.kind == 'mail_refresh': delay = 300 if success else 120
+        if action.kind == 'enhancement_access': delay = 300
         self.cooldowns[action.key] = time.time()+delay
         if not success and action.kind == 'stone_merge' and 'protected_stone' in message:
             self.cooldowns['stone_merge:protected'] = time.time()+30
-        if uncertain and action.kind != 'mail_refresh': self.cooldowns[action.key] = time.time()+86400
+        if uncertain and action.kind not in ('mail_refresh', 'enhancement_access'):
+            self.cooldowns[action.key] = time.time()+86400
         if uncertain and action.kind == 'equipment_equip':
             # Explicit desired-state equipment commands consume no materials.
             # Their old operation remains unknown; a new attempt is permitted

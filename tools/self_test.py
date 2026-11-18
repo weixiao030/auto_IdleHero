@@ -456,6 +456,8 @@ def run(output: Path):
     snapshot_reader_checks(check)
     from tools.salvage_scheduling_tests import run as salvage_scheduling_checks
     salvage_scheduling_checks(check)
+    from tools.enhancement_access_tests import run as enhancement_access_checks
+    enhancement_access_checks(check)
     output.write_text(json.dumps({'passed':len(tests),'tests':tests},ensure_ascii=False,indent=2),encoding='utf8')
     print(f'{len(tests)} regression scenarios passed; {output}')
 

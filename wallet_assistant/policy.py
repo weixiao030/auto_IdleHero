@@ -488,6 +488,9 @@ def plan(snapshot, opportunities, catalog, config):
             out.append(Action('consumables', 'consumable_potion', [], '启用原生低血量自动补给', 170))
         if buffs.get('exp_scroll_unlocked') and not buffs.get('exp_scroll_enabled') and (buffs.get('usable_exp_count', 0)>0 or buffs.get('exp_scroll_active')):
             out.append(Action('consumables', 'consumable_exp', [], '启用现有经验卷轴', 85))
+    if (enabled['enhancement'] and opportunities.get('enhancement_access_query_supported') is True
+            and number(opportunities.get('enhancement_access', {}).get('required_clear_map_id')) <= 0):
+        out.append(Action('enhancement', 'enhancement_access', [], '查询原生强化解锁条件', 60))
     if enabled['mail']:
         out.append(Action('mail', 'mail_refresh', [], '同步邮件奖励列表', 25))
         if opportunities.get('mail_ids'):
