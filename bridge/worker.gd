@@ -1,6 +1,6 @@
 extends Node
 
-const REVISION = 18
+const REVISION = 19
 var data_dir: String
 var host: Node
 var gateway: Object
@@ -398,7 +398,10 @@ func _execute(request: Dictionary) -> Variant:
 				return {"ok": false, "error": "invalid_arguments"}
 			var facade = host.get("skill_runtime_facade")
 			var preview: Dictionary = facade.call("unlock_preview", int(args[1]), 1) if action == "skill_learn" else facade.call("level_preview", int(args[1]))
-			var current_cost_ok: bool = _current_inventory_covers_cost(preview.get("cost", []), view)
+			var heroes = host.get("hero_progression_facade")
+			if heroes == null or str(heroes.call("skill_item_owner_key", int(args[1]))) != str(args[0]) or not heroes.call("owned_character_keys").has(str(args[0])):
+				return {"ok": false, "error": "skill_owner_changed"}
+			var current_cost_ok: bool = _current_inventory_covers_cost(preview.get("cost", []), view, str(args[0]))
 			if not bool(preview.get("ok", false)) or not bool(preview.get("can_afford", false)) or not current_cost_ok:
 				return {"ok": false, "error": preview.get("error", "skill_materials_not_ready")}
 			return runtime.call("request_skill_learn" if action == "skill_learn" else "request_skill_level_up", str(args[0]), int(args[1]))
@@ -698,6 +701,7 @@ func _export_opportunities() -> void:
 	out["enhancement_items"] = selectors.enhancement.call("equipment", raw, store)
 	out["enhancement_quote"] = clients.enhancement.get("quote")
 	out["enhancement_ready"] = clients.enhancement.call("ready")
+	out["enhancement_access"] = gateway.call("enhancement_access_snapshot") if gateway.has_method("enhancement_access_snapshot") else {}
 	out["socket_items"] = selectors.socket.call("equipment", raw, store)
 	out["socket_gems"] = selectors.socket.call("gems", raw, store)
 	out["socket_ready"] = clients.socket.call("ready")
@@ -748,14 +752,15 @@ func _consumable_instance(id: int, view: Dictionary, salvage: bool) -> bool:
 	for item in view.get("items", []):
 		if int(item.get("instance_id", item.get("id", 0))) != id:
 			continue
-		if bool(item.get("steam_trade_protected", true)) or bool(item.get("stored", false)) or bool(item.get("unidentified", false)):
+		var trade_permission: bool = salvage and bool(control.get("salvage_allow_tradeable", false)) and bool(view.get("steam_trade_ready", false)) and typeof(item.get("steam_trade_protected")) == TYPE_BOOL
+		if (bool(item.get("steam_trade_protected", true)) and not trade_permission) or bool(item.get("stored", false)) or bool(item.get("unidentified", false)):
 			return false
 		if int(item.get("state_flag", 0)) & (1 | 2 | 4 | 8 | 32 | 64):
 			return false
 		if salvage:
 			if not _salvage_grade_allowed(int(item.get("grade", 1))):
 				return false
-			if int(item.get("level", 1)) > 1 or int(item.get("enhance_level", 0)) > 0 or not item.get("socket_stats", []).is_empty():
+			if int(item.get("level", 1)) > 1 or int(item.get("enhance_level", 0)) > 0 or not item.get("socket_stats", []).is_empty() or _has_socket_materials(item):
 				return false
 		return true
 	# Collection slots can consume material records (for example, gems),
@@ -782,21 +787,43 @@ func _consumable_instance(id: int, view: Dictionary, salvage: bool) -> bool:
 	return false
 
 
-func _current_inventory_covers_cost(cost: Variant, view: Dictionary) -> bool:
+func _has_socket_materials(item: Dictionary) -> bool:
+	var layers: Variant = item.get("socket_materials", {})
+	if not layers is Dictionary:
+		return true
+	for slots in layers.values():
+		if not slots is Array:
+			return true
+		for material in slots:
+			if not material is Dictionary or not material.is_empty():
+				return true
+	return false
+
+
+func _current_inventory_covers_cost(cost: Variant, view: Dictionary, owner: String = "") -> bool:
 	if not cost is Array or cost.is_empty():
 		return false
 	var materials: Variant = view.get("materials", {})
 	if not materials is Dictionary:
 		return false
+	var totals: Dictionary = {}
 	for row in cost:
 		if not row is Dictionary:
 			return false
-		var item_id: int = int(row.get("item_data_id", row.get("item_id", 0)))
-		var required: int = int(row.get("count", row.get("required", 0)))
+		var item_id: int = _positive_id(row.get("item_data_id", row.get("item_id", 0)))
+		var required: int = _positive_id(row.get("count", row.get("required", 0)))
 		if item_id <= 0 or required <= 0:
 			return false
+		totals[item_id] = int(totals.get(item_id, 0)) + required
+	for item_id in totals:
 		var available: int = int(materials.get(str(item_id), materials.get(item_id, 0)))
-		if available < required:
+		if item_id == 200501:
+			var progress: Dictionary = view.get("character_progress_by_char", {}).get(owner, {})
+			var points: Variant = progress.get("skill_points")
+			if owner.is_empty() or typeof(points) not in [TYPE_INT, TYPE_FLOAT] or not is_finite(points) or points < 0 or floor(points) != points:
+				return false
+			available = int(points)
+		if available < int(totals[item_id]):
 			return false
 	return true
 

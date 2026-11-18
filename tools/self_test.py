@@ -34,7 +34,7 @@ def run(output: Path):
     check('非权威库存禁止消费',plan(s,{}, {},cfg)==[])
     check('跨快照旧机会不会触发动作',not opportunities_ready({'pid':1,'time_unix':100},{'pid':1,'time_unix':80},now=100))
     check('同步机会快照允许继续调度',opportunities_ready({'pid':1,'time_unix':100},{'pid':1,'time_unix':95},now=100))
-    skill_ready=deepcopy(snapshot);skill_ready['inventory']['materials']['200501']=1
+    skill_ready=deepcopy(snapshot);skill_ready['inventory']['character_progress_by_char']['new_hero']['skill_points']=1
     late={'skills':[{'owner':'new_hero','id':700001,'name':'后期技能','level':9,'preview':{'ok':True,'can_afford':True,'cost':[{'item_data_id':200501,'count':1}]}}]}
     check('任意角色150级仍加点',any(a.kind=='skill_level' and a.args==['new_hero',700001] for a in plan(skill_ready,late,{},cfg)))
     exhausted=deepcopy(late);exhausted['skills'][0]['preview']['can_afford']=False
@@ -444,6 +444,8 @@ def run(output: Path):
     sandbox_checks(check)
     from tools.multi_instance_tests import run as multi_instance_checks
     multi_instance_checks(check)
+    from tools.growth_recovery_tests import run as growth_recovery_checks
+    growth_recovery_checks(check)
     output.write_text(json.dumps({'passed':len(tests),'tests':tests},ensure_ascii=False,indent=2),encoding='utf8')
     print(f'{len(tests)} regression scenarios passed; {output}')
 

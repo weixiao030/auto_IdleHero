@@ -47,12 +47,15 @@ def main():
     with zipfile.ZipFile(guide) as docx:
         if docx.testzip() is not None or 'word/document.xml' not in docx.namelist():
             raise ValueError('Word 教程结构损坏')
+    bridge = json.loads((ROOT/'runtime/bridge-validation.json').read_text(encoding='utf8'))
+    if bridge.get('worker_revision') != 19 or bridge.get('total') != 237:
+        raise ValueError('桥接检查报告与当前源码不一致')
     release = {
-        'version': VERSION, 'worker_revision': 18,
+        'version': VERSION, 'worker_revision': bridge['worker_revision'],
         'file': executable_names[0], 'sha256': candidate['sha256'],
         'sandbox_file': executable_names[1], 'sandbox_sha256': candidate['sha256'],
         'source_tests': source['passed'], 'packaged_tests': packaged['passed'],
-        'bridge_boundary_tests': 220,
+        'bridge_boundary_tests': bridge['total'],
     }
     atomic_write(dist / 'SHA256.json', json_bytes(release))
     atomic_write(ROOT / 'runtime/packaged-self-test.json', json_bytes(packaged))
@@ -82,6 +85,9 @@ def main():
 更新前暂停所有实例并等待待结算和维护任务结束；使用 --stop 后替换助手。
 不要覆盖旧配置、调度记录或账号存档。详细启动、更新和排错步骤见 Word 教程。
 Word 教程沿用 0.4.0，启动与日常操作同样适用于当前版本。
+独立分解：成长策略顶部先“预览分解候选”，核对后“分解本次候选”；总开关暂停时也可使用。
+品质和“允许分解可交易装备”在分解卡片设置；未勾选品质、已穿戴、锁定和强化／镶嵌投入继续保留。
+独立任务仅处理本次预览，助手重启后不会自动扩大清理；已提交请求仍按原记录核验。
 游戏换 PID 后，助手跟随同一环境唯一的运行实例；手动选择离线实例后保持该选择。
 已退出的 PID 明确显示“已退出”，保留配置；多个游戏同时在线时不会擅自替换选中实例。
 
@@ -89,12 +95,12 @@ Word 教程沿用 0.4.0，启动与日常操作同样适用于当前版本。
 此包包含自有助手、文档和测试报告，不包含个人配置、账号日志、存档、游戏代码或游戏资源。
 ''', encoding='utf-8')
         (folder / '验证说明.txt').write_text(f'''发布复核时间：{datetime.now().strftime('%Y-%m-%d')}
-版本：{VERSION}，worker revision 18
+版本：{VERSION}，worker revision {bridge['worker_revision']}
 
-已通过：{source['passed']} 项源码回归、{packaged['passed']} 项 EXE 包内隔离自检、220 项 Godot 桥接边界检查，以及进程独立目录创建和快照写入检查。
+已通过：{source['passed']} 项源码回归、{packaged['passed']} 项 EXE 包内隔离自检、{bridge['total']} 项 Godot 桥接边界检查，以及进程独立目录创建和快照写入检查。
 隔离回归覆盖本机与多个沙盒独立并行调度、同一沙盒不同 PID、命令和回执隔离、重启恢复，以及自动重连默认关闭。
 
-本次连接修复实机覆盖：只重启助手，保留游戏 PID 与创建时间；各实例配置校验值不变，当前实例连接正常且保持原暂停状态。旧 PID 明确标记退出；游戏重启换 PID、助手重启、多实例歧义和手动选择由隔离回归覆盖。
+本次修复：技能使用所属角色点数，扩容分段积攒预算，满包优先清理，加入独立分解预览／执行／停止及可交易装备分解设置。当前实例按用户要求允许分解可交易且英雄以下的剩余装备；默认设置仍保护可交易物品。实机证据及覆盖边界见项目 VALIDATION.md。
 
 历史实机验收（2026-11-16，本次未重复执行）：当前沙盒连接和状态刷新；一次只读邮件同步由原生成功回执核验；16 个网页模块逐一关闭和恢复开启，保存生效；重新检测、显示选项、桌面与 390px 窄屏布局通过，浏览器无错误或警告。
 核验游戏 buildid 26636673，原生日志版本 v1.11.205。无需进一步逆向；如后续需要逆向，按约定使用 IDA。
@@ -102,7 +108,7 @@ Word 教程沿用 0.4.0，启动与日常操作同样适用于当前版本。
 2026-11-16 短时单实例、暂停自动化样本：助手 worker 单核 CPU 约 61.24% 降到 2.19%，RSS 约 187.4 MiB 降到 81.81 MiB；快照约 5.95 MB 缩减至 0.293 MB。8 次连续请求均连接正常，HTTP 响应约 4–14 ms。
 这些样本不代表多实例或长期负载。
 
-实机边界：目前只有一个真实沙盒游戏会话；本机和多个沙盒账号同时运行由隔离回归覆盖，尚未完成多个真实 Steam 账号同时实机验收。未为测试而强制消费金币、强化装备或切换账号；未解锁和资源不足的消费功能仍需对应真实条件验收。
+实机边界：目前只有一个真实沙盒游戏会话；本机和多个沙盒账号同时运行由隔离回归覆盖，尚未完成多个真实 Steam 账号同时实机验收。技能、星座、分解与开箱按当前用户授权和可用条件验证；强化等未解锁系统、其他账号及后期条件仍由隔离测试覆盖，不代表全部已现场消费成功。
 旧版本的 20 分钟运行记录不作为本版长期运行验证。
 
 校验方法：PowerShell 执行 Get-FileHash -Algorithm SHA256 -LiteralPath .\\桌面勇者自动远征.exe

@@ -22,6 +22,7 @@ DEFAULTS = {
     'stone_improvement_ratio': 0.025, 'salvage_grades': [1, 2, 3],
     'rune_priority': ['exp', 'gold', 'power', 'chest'],
     'prioritize_capacity': True, 'capacity_trigger_ratio': 0.85,
+    'capacity_saving_ratio': 0.25, 'salvage_allow_tradeable': False,
     'performance_mode': False, 'performance_fps': 10, 'minimal_effects': True,
     'modules': {key: True for key in MODULES},
 }
@@ -34,7 +35,8 @@ def normalize_config(value):
               'craft_target_grade': (1, 5), 'dungeon_interval_seconds': (60, 86400),
               'dungeon_key_reserve': (0, 1000000), 'maintenance_interval_seconds': (30, 86400),
               'spare_copies': (0, 5), 'stone_improvement_ratio': (0, .5),
-              'performance_fps': (10, 60), 'capacity_trigger_ratio': (.5, 1)}
+              'performance_fps': (10, 60), 'capacity_trigger_ratio': (.5, 1),
+              'capacity_saving_ratio': (0, 1)}
     for key, default in DEFAULTS.items():
         if isinstance(default, bool) and isinstance(source.get(key), bool): out[key] = source[key]
     for key, (low, high) in ranges.items():
@@ -211,15 +213,29 @@ def affordable(cost, inventory, config):
         if needed > have: return False
     return True
 
-def skill_preview_affordable(preview, inventory, config):
+def skill_preview_affordable(preview, inventory, config, owner):
     cost = preview.get('cost')
     if not isinstance(cost, list) or not cost: return False
+    combined = {}
     for row in cost:
         if not isinstance(row, dict): return False
-        key = number(row.get('item_data_id', row.get('item_id', 0)))
-        needed = number(row.get('count', row.get('required', 0)))
-        if key <= 0 or int(key) != key or needed <= 0: return False
-    return affordable(cost, inventory, config)
+        key = row.get('item_data_id', row.get('item_id', 0))
+        needed = row.get('count', row.get('required', 0))
+        if (type(key) not in (int, float) or not math.isfinite(key) or key <= 0 or int(key) != key
+                or type(needed) not in (int, float) or not math.isfinite(needed) or needed <= 0 or int(needed) != needed):
+            return False
+        combined[int(key)] = combined.get(int(key), 0)+needed
+    # Skill points belong to the skill's owner, never to the material bag.
+    materials = dict(inventory.get('materials', {}))
+    progress = inventory.get('character_progress_by_char', {}).get(owner, {})
+    points = progress.get('skill_points')
+    if 200501 in combined:
+        if type(points) not in (int, float) or not math.isfinite(points) or points < 0 or int(points) != points:
+            return False
+        materials['200501'] = points
+    return affordable([{'item_data_id':key,'count':count} for key,count in combined.items()],
+                      {**inventory, 'materials': materials}, config)
+
 
 def capacity_goal(snapshot, opportunities, config):
     """Find an attainable native capacity node, including its unmet prerequisites."""
@@ -268,8 +284,12 @@ def growth_budget(snapshot, opportunities, config, capacity=None):
     capacity = capacity if capacity is not None else capacity_goal(snapshot, opportunities, config)
     if not capacity: return config
     gold_needed = sum(number(row.get('count')) for row in capacity['cost'] if int(row.get('item_data_id', row.get('item_id', 0)))==5)
-    _, base = reserve(snapshot.get('inventory', {}), config)
-    return {**config, '_capacity_gold_reserve': base+gold_needed}
+    gold, base = reserve(snapshot.get('inventory', {}), config)
+    # Once affordable, protect the whole next expansion. Until then, save a
+    # bounded share so an expensive late node cannot freeze all other growth.
+    available = max(0, gold-base)
+    saving = gold_needed if gold_needed <= available else available*config['capacity_saving_ratio']
+    return {**config, '_capacity_gold_reserve': base+saving}
 
 def has_socket_materials(item):
     """Keep real investments and unknown data, but ignore empty native slots."""
@@ -299,7 +319,7 @@ def empty_socket_count(item):
     return sum(index >= len(materials) or materials[index] == {} for index in range(capacity))
 
 
-def protected_items(snapshot, config):
+def protected_items(snapshot, config, *, allow_tradeable=False):
     """Keep loadouts, investments, native locks, and useful spares for every owned job.
 
     A full bag changes the trade-off: the configured spare slot is a convenience,
@@ -316,7 +336,9 @@ def protected_items(snapshot, config):
     spare_copies = 0 if bag_pressure else int(config.get('spare_copies', 0))
     for item in inv.get('items', []):
         # Unknown Steam metadata is never permission to consume an item.
-        if item.get('steam_trade_protected', True):
+        trade_permission = (allow_tradeable and inv.get('steam_trade_ready') is True
+                            and type(item.get('steam_trade_protected')) is bool)
+        if item.get('steam_trade_protected', True) and not trade_permission:
             protected.add(iid(item))
         if item.get('stored') or item.get('unidentified') or int(item.get('state_flag', 0)) & (1|2|4|8|32|64):
             protected.add(iid(item))
@@ -428,7 +450,7 @@ def plan(snapshot, opportunities, catalog, config):
             preview = row.get('preview', {})
             owner = row['owner']
             if (owner not in active or not preview.get('ok') or preview.get('can_afford') is not True
-                    or not skill_preview_affordable(preview, inv, config)): continue
+                    or not skill_preview_affordable(preview, inv, config, owner)): continue
             kind = 'skill_learn' if row['level'] == 0 else 'skill_level'
             # Spend points gradually across the unlocked tree, including late passive skills.
             prio = 120 - row['level'] * 3 + min(20, number(preview.get('required_spent_skill_points')) / 5)
@@ -526,12 +548,12 @@ def plan(snapshot, opportunities, catalog, config):
                         id = int(candidate.get('item_id',0))
                         if id in protected or id in collection_item_ids or candidate.get('requires_confirmation'): continue
                         if not collection_item_safe(id, snapshot, opportunities, material_reserve): continue
-                        out.append(Action('collection','collection_register',[str(group['id']),str(row['key']),id],f"图鉴登记 · {row.get('item_name','')}",65))
+                        out.append(Action('collection','collection_register',[str(group['id']),str(row['key']),id],f"图鉴登记 · {row.get('item_name','')}",186 if bag_pressure(snapshot, config) else 65))
                         collection_item_ids.add(id)
                         break
     if enabled['craft']:
         for row in opportunities.get('recipes', []):
-            if not row.get('executable'): continue
+            if not row.get('executable') or bag_pressure(snapshot, config): continue
             craft_gold = sum(number(m.get('required')) for m in row.get('plan', {}).get('materials', [])
                              if int(m.get('item_data_id', 0)) == 5)
             if craft_gold > max(0, gold-keep): continue
@@ -555,29 +577,11 @@ def plan(snapshot, opportunities, catalog, config):
     if enabled['inventory']:
         # Collection candidates get first use of surplus; retain material for usable recipes.
         collection_ids = {int(action.args[2]) for action in out if action.kind == 'collection_register'}
-        surplus=[]
+        review = salvage_review(snapshot, opportunities, config, collection_ids)
+        surplus = [row['id'] for row in review if row['eligible']]
         salvage_rows = opportunities.get('salvage', {})
         material_records = {int(row.get('record_id', row.get('instance_id', row.get('id', 0)))): row
                             for row in inv.get('material_records', [])}
-        for key,row in opportunities.get('salvage',{}).items():
-            id=int(key)
-            if id in protected or id in collection_ids or not row.get('eligible'): continue
-            if int(row.get('grade', 1)) not in config['salvage_grades']: continue
-            category = row.get('category_filter')
-            if category == 'material':
-                record = material_records.get(id)
-                data_id = int(row.get('item_data_id', row.get('definition', {}).get('id', 0)))
-                if (record is None or material_reserve is None or data_id in material_reserve
-                        or int(record.get('count', 0)) <= 0
-                        or int(record.get('state_flag', 0)) & (1|2|4|8|32|64)
-                        or record.get('stored')
-                        or int(row.get('count', 0)) != int(record.get('count', 0))):
-                    continue
-            elif category in ['weapon','armor','accessory']:
-                if int(row.get('level',1))>1 or row.get('option',{}).get('slots'): continue
-            else:
-                continue
-            surplus.append(id)
         selection = [int(x) for x in opportunities.get('salvage_selection', {})]
         quote_id = int(opportunities.get('salvage_quote', {}).get('request_id', 0))
         selected_counts = {int(id): int(count) for id, count in opportunities.get('salvage_selection', {}).items()}
@@ -596,12 +600,71 @@ def plan(snapshot, opportunities, catalog, config):
             if gear_ids: expected['consumed'] = gear_ids
             if material_counts: expected['material_counts'] = material_counts
             out.append(Action('inventory','salvage_execute',[int(snapshot['pid']),quote_id,request_rows],
-                              '分解已报价的剩余装备与旧阶材料',155,expected))
+                              '分解已报价的剩余装备与旧阶材料',188 if bag_pressure(snapshot, config) else 155,expected))
         elif surplus:
             full = int(inv.get('bag_occupied_slots',0)) / max(1,int(inv.get('bag_unlocked_slots',1)))
-            out.append(Action('inventory','salvage_quote',surplus[:30],f'回收 {len(surplus[:30])} 件装备与旧阶材料',158 if full>.8 else 45))
+            out.append(Action('inventory','salvage_quote',surplus[:30],f'回收 {len(surplus[:30])} 件装备与旧阶材料',187 if full>=config['capacity_trigger_ratio'] else 45))
     if enabled['dungeon']:
         dungeon=opportunities.get('dungeon',{}); floor=min(int(dungeon.get('unlocked_floor',0)),max(0,int(dungeon.get('keys',0))-config['dungeon_key_reserve']))
         if floor>0 and not opportunities.get('in_dungeon') and not snapshot.get('in_dungeon') and not dungeon.get('entry_blocked') and not dungeon.get('session_required'):
             out.append(Action('dungeon','dungeon_enter',[floor],f'挑战副本第 {floor} 层',35))
     return sorted(out,key=lambda x:x.priority,reverse=True)
+
+
+def bag_pressure(snapshot, config):
+    inv = snapshot.get('inventory', {})
+    cap = number(inv.get('bag_unlocked_slots'))
+    return cap > 0 and number(inv.get('bag_occupied_slots'))/cap >= config['capacity_trigger_ratio']
+
+
+def salvage_review(snapshot, opportunities, config, collection_ids=()):
+    """Use the same live allow-list for automatic and standalone dismantling."""
+    inv = snapshot.get('inventory', {})
+    protected = protected_items(snapshot, config, allow_tradeable=config['salvage_allow_tradeable'])
+    equipped = equipped_ids(inv)
+    items = {iid(row): row for row in inv.get('items', [])}
+    materials = {int(row.get('record_id', row.get('instance_id', row.get('id', 0)))): row
+                 for row in inv.get('material_records', [])}
+    material_reserve = salvage_material_reserve_ids(snapshot, opportunities)
+    only = config.get('_salvage_ids')
+    out = []
+    for key, row in opportunities.get('salvage', {}).items():
+        ident = int(key)
+        category = row.get('category_filter')
+        item = materials.get(ident) if category == 'material' else items.get(ident)
+        reason = ''
+        if only is not None and ident not in only: continue
+        if not item:
+            reason = '库存记录已变化'
+        elif ident in equipped:
+            reason = '已穿戴'
+        elif item.get('stored') or item.get('unidentified') or int(item.get('state_flag', 0)) & (1|2|4|8|32|64):
+            reason = '锁定、仓库或未鉴定'
+        elif category != 'material' and item.get('steam_trade_protected', True) and not (
+                config['salvage_allow_tradeable'] and inv.get('steam_trade_ready') is True
+                and type(item.get('steam_trade_protected')) is bool):
+            reason = '可交易保护或交易信息未就绪'
+        elif int(item.get('enhance_level', 0)) > 0 or item.get('socket_stats') or has_socket_materials(item) or int(row.get('level', 1)) > 1 or row.get('option', {}).get('slots'):
+            reason = '强化或镶嵌投入'
+        elif ident in protected:
+            reason = '当前或下一阶段备用装备'
+        elif ident in collection_ids:
+            reason = '留作永久图鉴登记'
+        elif int(row.get('grade', 1)) not in config['salvage_grades']:
+            reason = '品质未勾选'
+        elif not row.get('eligible'):
+            reason = '原生分解条件未满足'
+        elif category == 'material':
+            data_id = int(row.get('item_data_id', row.get('definition', {}).get('id', 0)))
+            if material_reserve is None or data_id in material_reserve:
+                reason = '当前或下一阶配方材料'
+            elif int(item.get('count', 0)) <= 0 or int(row.get('count', 0)) != int(item.get('count', 0)):
+                reason = '材料数量已变化'
+        elif category not in ('weapon', 'armor', 'accessory'):
+            reason = '宝石或其他保留物品'
+        count = int(item.get('count', 0)) if item and category == 'material' else 1
+        out.append({'id': ident, 'name': (item or {}).get('name', row.get('definition', {}).get('name', str(ident))),
+                    'grade': int(row.get('grade', 1)), 'count': count, 'category': category,
+                    'tradeable': bool((item or {}).get('steam_trade_protected')),
+                    'eligible': not bool(reason), 'reason': reason or '可分解'})
+    return out

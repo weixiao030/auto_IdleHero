@@ -86,6 +86,13 @@ class Handler(BaseHTTPRequestHandler):
             try: engine = manager.target_engine(value.pop('_instance_id'))
             except ValueError as exc: return self.reply(409,{'error':str(exc)})
         else: engine = manager
+        if self.path in ('/api/salvage/preview', '/api/salvage/start', '/api/salvage/stop'):
+            try:
+                if self.path.endswith('/preview'): result = engine.preview_salvage()
+                elif self.path.endswith('/start'): result = engine.start_salvage(value.get('token'))
+                else: result = engine.stop_salvage()
+            except ValueError as exc: return self.reply(409, {'error': str(exc)})
+            return self.reply(200, {'ok': True, 'result': result})
         if self.path=='/api/run':
             engine.set_running(True);return self.reply(200,{'ok':True})
         if self.path=='/api/pause':

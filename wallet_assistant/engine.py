@@ -4,13 +4,14 @@ from collections import deque
 from dataclasses import asdict
 from pathlib import Path
 import json
+import hashlib
 import math
 import os
 import threading
 import time
 import uuid
 from . import runtime, VERSION
-from .policy import Action, MODULES, normalize_config, plan, active_characters, equipped_ids, iid, power, reserve, capacity_goal, growth_budget, empty_socket_count
+from .policy import Action, MODULES, normalize_config, plan, active_characters, equipped_ids, iid, power, reserve, capacity_goal, growth_budget, empty_socket_count, salvage_review, bag_pressure
 
 def read_json(path, fallback=None):
     try: return json.loads(Path(path).read_text(encoding='utf-8-sig'))
@@ -124,6 +125,8 @@ class Engine:
         saved_recovery = self.state.get('next_recovery_at', 0)
         self.next_recovery_at = max(0, saved_recovery) if finite_number(saved_recovery) else 0
         self.inspection_requested = False
+        self.salvage_preview = None
+        self.salvage_job = None
         self.last_config_check = 0
         self.config_stamp = None
         self.hotkeys = {}
@@ -186,6 +189,9 @@ class Engine:
         if type(account_id) is not int or account_id <= 0: return False
         if self.account_id == account_id: return False
         previous = self.account_id
+        if self.salvage_job and self.salvage_job['active']:
+            self.stop_salvage('账号已变化，请重新预览')
+        self.salvage_preview = None
         if previous is not None:
             self._quarantine_pending('检测到账号切换')
             old_state = {'cooldowns': self.cooldowns, 'module_last_run': self.module_last_run}
@@ -235,7 +241,10 @@ class Engine:
             return self.config
 
     def publish_config(self):
-        runtime.atomic_json(self.runtime_dir/'control.json', self.config)
+        control = self.config
+        if self.salvage_job and self.salvage_job['active']:
+            control = {**control, 'salvage_grades': self.salvage_job['grades']}
+        runtime.atomic_json(self.runtime_dir/'control.json', control)
         if not (self.data_dir/'config.json').exists():
             runtime.atomic_json(self.data_dir/'config.json', self.config)
 
@@ -265,6 +274,88 @@ class Engine:
             self.last_dispatch = 0
             self.inspection_requested = True
             self.log('system','已安排立即巡检，沿用当前开关、资源保护与请求退避')
+
+    def _salvage_config(self, grades, ids=None):
+        config = {**self.config, 'salvage_grades': grades,
+                  'modules': {key: key == 'inventory' or key == 'collection' and self.config['modules']['collection'] for key in MODULES}}
+        if ids is not None: config['_salvage_ids'] = ids
+        return config
+
+    def _salvage_preview(self, grades):
+        stamp = self.snapshot.get('time_unix', 0)
+        if (not self.snapshot.get('connected') or self.snapshot.get('phase') != 'ready'
+                or not finite_number(stamp) or not 0 <= time.time()-stamp <= 8
+                or not opportunities_ready(self.snapshot, self.opportunities)
+                or not self.snapshot.get('inventory', {}).get('server_inventory_mutation_safe')
+                or snapshot_account_id(self.snapshot) != self.account_id or self.account_id is None):
+            raise ValueError('等待当前实例连接、账号与库存预览就绪后重试。')
+        if self.snapshot.get('revision', 0) < 19:
+            raise ValueError('等待分解保护桥接更新后重试。')
+        config = self._salvage_config(grades)
+        actions = plan(self.snapshot, self.opportunities, self.catalog, config)
+        collection_ids = {int(a.args[2]) for a in actions if a.kind == 'collection_register'}
+        rows = salvage_review(self.snapshot, self.opportunities, config, collection_ids)
+        candidates = [r for r in rows if r['eligible']]
+        protected = {}
+        for row in rows:
+            if not row['eligible']: protected[row['reason']] = protected.get(row['reason'], 0)+1
+        identity = {'pid': self.snapshot['pid'], 'account_id': self.account_id, 'grades': grades,
+                    'allow_tradeable': config['salvage_allow_tradeable'],
+                    'candidates': candidates}
+        token = hashlib.sha256(json.dumps(identity, sort_keys=True, ensure_ascii=False).encode('utf8')).hexdigest()
+        return {**identity, 'token': token, 'time': time.time(), 'protected': protected,
+                'count': len(candidates), 'equipment_count': sum(r['category'] != 'material' for r in candidates)}
+
+    def preview_salvage(self):
+        with self.lock:
+            self.salvage_preview = self._salvage_preview(list(self.config['salvage_grades']))
+            return self.salvage_preview
+
+    def start_salvage(self, token):
+        with self.lock:
+            if self.salvage_job and self.salvage_job['active']:
+                raise ValueError('独立分解正在运行。')
+            preview = self.salvage_preview
+            if not preview or preview.get('used') or preview['token'] != token or time.time()-preview['time'] > 120:
+                raise ValueError('请先预览本次分解候选，预览有效期为两分钟。')
+            current = self._salvage_preview(list(self.config['salvage_grades']))
+            if current['token'] != token:
+                self.salvage_preview = current
+                raise ValueError('分解候选或保护设置已变化，请核对新预览后重试。')
+            if not current['candidates']: raise ValueError('没有符合当前品质与保护设置的分解候选。')
+            self.salvage_preview['used'] = True
+            self.salvage_job = {'id': uuid.uuid4().hex, 'active': True, 'status': '等待当前结算后独立分解',
+                                'pid': current['pid'], 'account_id': current['account_id'],
+                                'grades': current['grades'], 'ids': [r['id'] for r in current['candidates']],
+                                'completed': 0, 'total': current['count'], 'started': time.time()}
+            self.publish_config()
+            self.log('inventory', f"独立分解已开始：{current['count']} 条候选，仅处理本次预览的物品")
+            self.last_dispatch = 0
+            return self.salvage_job
+
+    def stop_salvage(self, status='已停止；已提交请求继续核验'):
+        with self.lock:
+            if self.salvage_job:
+                self.salvage_job.update(active=False, status=status)
+                self.publish_config()
+            return self.salvage_job
+
+    def standalone_salvage_action(self):
+        job = self.salvage_job
+        if (job['pid'] != self.snapshot.get('pid') or job['account_id'] != snapshot_account_id(self.snapshot)
+                or time.time()-job['started'] > 900):
+            self.stop_salvage('实例或账号已变化，或任务已超时；请重新预览')
+            return None
+        config = self._salvage_config(job['grades'], job['ids'])
+        actions = [a for a in plan(self.snapshot, self.opportunities, self.catalog, config) if a.module == 'inventory']
+        if not actions:
+            self.stop_salvage('本次清理已完成；受保护或条件变化的物品已保留')
+            return None
+        action = next((a for a in actions if self.action_ready(a)), None)
+        job['status'] = '独立分解中' if action else '等待报价刷新或请求退避'
+        if action:
+            action.expected = {**(action.expected or {}), 'salvage_job': job['id']}
+        return action
 
     def handle_hotkey(self, key):
         with self.lock:
@@ -409,6 +500,15 @@ class Engine:
         self.log(action.module, message, 'success' if success else 'warning',
                  action=action.kind, operation_id=task['id'], uncertain=uncertain)
         if success: self.success_count += 1
+        if (self.salvage_job and (action.expected or {}).get('salvage_job') == self.salvage_job['id']):
+            if not success:
+                self.stop_salvage('分解未确认成功，已停止；详见运行记录')
+            elif action.kind == 'salvage_execute':
+                consumed = set((action.expected or {}).get('consumed', [])) | {int(i) for i in (action.expected or {}).get('material_counts', {})}
+                self.salvage_job['ids'] = [i for i in self.salvage_job['ids'] if i not in consumed]
+                self.salvage_job['completed'] += len(consumed)
+                if not self.salvage_job['ids']:
+                    self.stop_salvage('本次清理已完成')
         delay = 9 if success else 120
         if action.kind == 'dungeon_enter': delay = self.config['dungeon_interval_seconds']
         if action.kind == 'craft': delay = 15 if success else 180
@@ -856,10 +956,19 @@ class Engine:
                 self.last_sample=time.time()
                 self.persist()
             self.actions=plan(self.snapshot,self.opportunities,self.catalog,self.config)
+            if self.salvage_job and self.salvage_job['active']:
+                action = self.standalone_salvage_action()
+                self.status = self.salvage_job['status']
+                if action: self.dispatch(action)
+                return
             if not self.running and not self.inspection_requested: return
             eligible=[a for a in self.actions if self.action_ready(a)]
             now=time.time()
             eligible.sort(key=lambda a:a.priority+min(90,max(0,now-self.module_last_run.get(a.module,self.started))/3),reverse=True)
+            # Capacity recovery must not lose to aging bonuses on routine work.
+            recovery = [a for a in eligible if a.kind in ('salvage_quote', 'salvage_execute', 'collection_register', 'identify', 'equipment_equip', 'rune_level') and a.priority >= 140]
+            if bag_pressure(self.snapshot, self.config) and recovery:
+                eligible = sorted(recovery, key=lambda a:a.priority, reverse=True)
             # Higher impact formation/skills/rune upgrades settle before gear maintenance.
             action=eligible[0] if eligible and eligible[0].priority>=75 else self.maintenance_action()
             if not action and eligible: action=eligible[0]
@@ -887,19 +996,9 @@ class Engine:
             active=active_characters(s)
             candidates={k:[] for k in MODULES}
             for a in self.actions: candidates[a.module].append(a.label)
-            wait_reasons = {}
-            if any(row.get('owner') in active and row.get('preview', {}).get('ok')
-                   and row.get('preview', {}).get('can_afford') is False
-                   for row in self.opportunities.get('skills', [])):
-                wait_reasons['skills'] = '技能点或材料不足，等待下一次资源到账'
-            dungeon = self.opportunities.get('dungeon', {})
-            if dungeon.get('entry_blocked'):
-                wait_reasons['dungeon'] = '等待领取副本奖励，腾出奖励容量后继续挑战'
-            elif dungeon.get('session_required'):
-                wait_reasons['dungeon'] = '等待游戏服务器会话就绪'
+            from .diagnostics import module_reasons
+            wait_reasons = module_reasons(s, self.opportunities, self.config)
             capacity = capacity_goal(s, self.opportunities, self.config)
-            if capacity:
-                wait_reasons['runes'] = f"容量联动：为 {capacity['name']} 保留金币，等待资源到账"
             return {'version':VERSION,'status':self.status,'error':self.error,'running':self.running,
                 'connection': {'mode': 'sandbox' if self.connection.get('sandbox') else 'local',
                     'sandbox': self.connection.get('sandbox', ''), 'pid': self.connection.get('pid'),
@@ -907,7 +1006,7 @@ class Engine:
                 'display':s.get('assistant_display',{}),'hotkeys':self.hotkeys,
                 'config_path':str(self.data_dir/'config.json'),'grade_names':s.get('grade_names',{}),
                 'rune_next':next((a.label for a in self.actions if a.kind=='rune_level'),''),
-                'capacity_goal':capacity,
+                'capacity_goal':capacity, 'salvage_preview':self.salvage_preview, 'salvage_job':self.salvage_job,
                 'connected':s.get('connected',False),'uptime':time.time()-self.started,
                 'snapshot_time':s.get('time_unix',0),'phase':s.get('phase','waiting_game'),
                 'game_path':str(self.game or ''),'config':self.config,'success_count':self.success_count,
@@ -919,7 +1018,7 @@ class Engine:
                     **inv.get('character_progress_by_char',{}).get(key,{}),
                     'power':inv.get('character_combat_power_by_char',{}).get(key,0)} for key in s.get('owned_characters',[])],
                 'modules':[{'key':k,'name':name,'enabled':self.config['modules'][k],
-                    'candidates':len(candidates[k]),'reason':candidates[k][0] if candidates[k] else wait_reasons.get(k, '等待资源、解锁条件或下一轮刷新')} for k,name in MODULES.items()],
+                    'candidates':len(candidates[k]),'reason':('功能已关闭' if not self.config['modules'][k] else candidates[k][0] if candidates[k] else wait_reasons[k])} for k,name in MODULES.items()],
                 'queue':[a.json() for a in self.actions[:10]],'logs':list(self.logs),'metrics':list(self.metrics),
                 'pending':{'label':self.pending['label'],'elapsed':time.time()-self.pending['started']} if self.pending else None,
                 'maintenance':self.maintenance}

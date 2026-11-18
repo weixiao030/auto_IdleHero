@@ -1,6 +1,6 @@
 """Parse the self-written bridge in an isolated Godot pack, without a game session."""
 from pathlib import Path
-import hashlib, struct, subprocess, shutil, os
+import hashlib, struct, subprocess, shutil, os, json, re
 
 ROOT = Path(__file__).resolve().parent.parent
 LAB = ROOT / '.private/lab'
@@ -47,6 +47,13 @@ class FakeUI extends RefCounted:
 
 class FakeCoordinator extends RefCounted:
     var retry_pending = false
+    var skill_calls: Array = []
+    func request_skill_learn(owner, id):
+        skill_calls.append([owner,id])
+        return {"request_id":77}
+    func request_skill_level_up(owner, id):
+        skill_calls.append([owner,id])
+        return {"request_id":78}
     func login_retry_pending():
         return retry_pending
 
@@ -91,7 +98,21 @@ class FakeBootstrap extends RefCounted:
     func confirm_initial_character_selection(character):
         selected = character
 
+class FakeHeroes extends RefCounted:
+    func skill_item_owner_key(_id):
+        return "hero"
+    func owned_character_keys():
+        return ["hero"]
+
+class FakeSkills extends RefCounted:
+    func unlock_preview(_id, _level):
+        return {"ok":true,"can_afford":true,"cost":[{"item_data_id":200501,"count":1}]}
+    func level_preview(_id):
+        return {"ok":true,"can_afford":true,"cost":[{"item_data_id":200501,"count":1}]}
+
 class FakeHost extends Node:
+    var hero_progression_facade = FakeHeroes.new()
+    var skill_runtime_facade = FakeSkills.new()
     var server_connection_ui_controller = FakeUI.new()
     var server_runtime_coordinator = FakeCoordinator.new()
     var world_socket_gateway = RefCounted.new()
@@ -171,6 +192,34 @@ func _ready() -> void:
     if worker._execute(matching_request) != {"ok":true} or account_host.account_bootstrap_coordinator.selected != "hero":
         push_error("Matching JSON account command failed native dispatch")
         account_host.free()
+        worker.free()
+        return
+    checks += 1
+    account_host.progression_selectors.view = {"server_inventory_mutation_safe":true,"items":[],"materials":{"200501":99},"character_progress_by_char":{"hero":{"skill_points":1},"other":{"skill_points":99}}}
+    var skill_request = {"account_id":501,"action":"skill_learn","args":["hero",200101]}
+    if worker._execute(skill_request) != {"request_id":77} or account_host.server_runtime_coordinator.skill_calls.size() != 1:
+        push_error("Owner points did not dispatch skill learning")
+        worker.free()
+        return
+    checks += 1
+    skill_request.args[0] = "other"
+    if worker._execute(skill_request) != {"ok":false,"error":"skill_owner_changed"} or account_host.server_runtime_coordinator.skill_calls.size() != 1:
+        push_error("Wrong skill owner reached native dispatch")
+        worker.free()
+        return
+    checks += 1
+    skill_request.args[0] = "hero"
+    account_host.progression_selectors.view.character_progress_by_char.hero.skill_points = 0
+    var rejected = worker._execute(skill_request)
+    if rejected.get("ok", true) or account_host.server_runtime_coordinator.skill_calls.size() != 1:
+        push_error("Stale affordable preview ignored current owner balance")
+        worker.free()
+        return
+    checks += 1
+    account_host.progression_selectors.view.character_progress_by_char.hero.skill_points = 1
+    skill_request.action = "skill_level"
+    if worker._execute(skill_request) != {"request_id":78}:
+        push_error("Owner skill level request did not dispatch")
         worker.free()
         return
     checks += 1
@@ -257,6 +306,42 @@ func _ready() -> void:
         worker.free()
         return
     checks += 1
+    worker.control["salvage_allow_tradeable"] = true
+    view["steam_trade_ready"] = true
+    if not worker._consumable_instance(10, view, true) or worker._consumable_instance(10, view, false):
+        push_error("Trade permission did not remain salvage-specific")
+        worker.free()
+        return
+    checks += 1
+    view.steam_trade_ready = false
+    if worker._consumable_instance(10, view, true):
+        push_error("Trade permission accepted unknown catalog")
+        worker.free()
+        return
+    checks += 1
+    view.steam_trade_ready = true
+    item.erase("steam_trade_protected")
+    if worker._consumable_instance(10, view, true):
+        push_error("Trade permission accepted unknown metadata")
+        worker.free()
+        return
+    checks += 1
+    item.steam_trade_protected = true
+    item.grade = 5
+    if worker._consumable_instance(10, view, true):
+        push_error("Trade permission bypassed quality protection")
+        worker.free()
+        return
+    checks += 1
+    item.grade = 1
+    item.socket_materials = {"decoration":[{"item_data_id":1}]}
+    if worker._consumable_instance(10, view, true):
+        push_error("Trade permission bypassed socket investment")
+        worker.free()
+        return
+    checks += 1
+    item.socket_materials = {}
+    worker.control["salvage_allow_tradeable"] = false
     item.steam_trade_protected = false
     item.state_flag = 4
     if worker._consumable_instance(10, view, true):
@@ -382,21 +467,21 @@ func _ready() -> void:
         worker.free()
         return
     checks += 1
-    var skill_view = {"materials":{"200501":1}}
+    var skill_view = {"materials":{}, "character_progress_by_char":{"hero":{"skill_points":1}}}
     var skill_cost = [{"item_data_id":200501,"count":1}]
-    if not worker._current_inventory_covers_cost(skill_cost, skill_view):
+    if not worker._current_inventory_covers_cost(skill_cost, skill_view, "hero"):
         push_error("Current skill-point balance rejected an affordable upgrade")
         worker.free()
         return
     checks += 1
-    skill_view.materials["200501"] = 0
-    if worker._current_inventory_covers_cost(skill_cost, skill_view):
+    skill_view.character_progress_by_char.hero.skill_points = 0
+    if worker._current_inventory_covers_cost(skill_cost, skill_view, "hero"):
         push_error("Insufficient current skill points accepted")
         worker.free()
         return
     checks += 1
-    skill_view.materials.erase("200501")
-    if worker._current_inventory_covers_cost(skill_cost, skill_view):
+    skill_view.character_progress_by_char.hero.erase("skill_points")
+    if worker._current_inventory_covers_cost(skill_cost, skill_view, "hero"):
         push_error("Missing current skill-point balance accepted")
         worker.free()
         return
@@ -411,6 +496,24 @@ func _ready() -> void:
         worker.free()
         return
     checks += 1
+    skill_view.character_progress_by_char.hero.skill_points = 1
+    if worker._current_inventory_covers_cost(skill_cost, skill_view, "other") or worker._current_inventory_covers_cost(skill_cost, skill_view):
+        push_error("Unrelated skill-point owner accepted")
+        worker.free()
+        return
+    checks += 1
+    if worker._current_inventory_covers_cost(skill_cost + skill_cost, skill_view, "hero"):
+        push_error("Duplicate skill cost not totaled")
+        worker.free()
+        return
+    checks += 1
+    for invalid in [true, "2", -1, 1.5, INF, NAN]:
+        skill_view.character_progress_by_char.hero.skill_points = invalid
+        if worker._current_inventory_covers_cost(skill_cost, skill_view, "hero"):
+            push_error("Invalid skill-point balance accepted")
+            worker.free()
+            return
+        checks += 1
     var connection_checks = _connection_checks(worker)
     var fixture = load("res://loading_check.gd").new()
     var loading_checks = fixture.run(worker)
@@ -515,8 +618,12 @@ func _connection_checks(worker) -> int:
     if p.returncode or any(x in text for x in ['SCRIPT ERROR','Parse Error','Failed to load script']):
         raise SystemExit(1)
     if '[WalletHeroesAssistant] loader revision 2' not in text: raise SystemExit('Observer missing')
-    if 'const REVISION = 18' not in (ROOT/'bridge/worker.gd').read_text(encoding='utf8'): raise SystemExit('Multi-instance bridge revision missing')
-    if '[WalletHeroesAssistant] consumption checks passed: 57' not in text: raise SystemExit('Consumption boundary checks failed')
+    if 'const REVISION = 19' not in (ROOT/'bridge/worker.gd').read_text(encoding='utf8'): raise SystemExit('Multi-instance bridge revision missing')
+    if '[WalletHeroesAssistant] consumption checks passed: 74' not in text: raise SystemExit('Consumption boundary checks failed')
     if '[WalletHeroesAssistant] connection checks passed: 33' not in text: raise SystemExit('Connection boundary checks failed')
     if '[WalletHeroesAssistant] loading checks passed: 130' not in text: raise SystemExit('Loading boundary checks failed')
-    print('Isolated observer syntax passed; 220 boundary checks passed.')
+    report = {name:int(re.search(r'\[WalletHeroesAssistant\] '+name+r' checks passed: (\d+)', text).group(1)) for name in ('consumption','connection','loading')}
+    report['total'] = sum(report.values())
+    report['worker_revision'] = 19
+    (ROOT/'runtime/bridge-validation.json').write_text(json.dumps(report,indent=2),encoding='utf8')
+    print(f"Isolated observer syntax passed; {report['total']} boundary checks passed.")
